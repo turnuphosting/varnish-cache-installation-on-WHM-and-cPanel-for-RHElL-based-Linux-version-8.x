@@ -12,3 +12,9 @@ This would temporarily make user websites inaccessible until finished.
 # Installing
 `git clone` this repository, cd into the directory. Run `make clean`.
 Once done, run `vi /etc/varnish/default.vcl` and compare and add missing ones from https://github.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/blob/main/vcl%20config%20for%20wordpress to your vcl config.
+
+# Varnish Cache Flush cPanel Plugin
+You can go to https://github.com/turnuphosting/cPanel-plugin-to-flush-varnish-cache-for-user-websites and follow the steps there to install cPanel Plugin that'll allow your users to clear Varnish cache for their domains directly from cPanel.
+
+# For WordPress users:
+You can easily clear Varnish cache using this plugin https://wordpress.org/plugins/varnish-http-purge.
