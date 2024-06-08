@@ -1,4 +1,4 @@
-Compare with your current vcl configuration and add the missing ones in there. 
+# Compare with your current vcl configuration and add the missing ones. 
 
 import proxy;
 
