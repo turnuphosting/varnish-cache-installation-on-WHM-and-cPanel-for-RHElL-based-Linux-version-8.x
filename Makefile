@@ -43,3 +43,4 @@ uninstall:
 	sudo systemctl daemon-reload
 	sudo systemctl restart httpd
 	crontab -l | grep -v "/root/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/$(UPDATE_SCRIPT_NAME)" | crontab -
+	rm -rf /root/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x
