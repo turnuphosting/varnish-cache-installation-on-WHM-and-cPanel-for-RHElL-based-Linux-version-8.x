@@ -23,7 +23,8 @@ Edit your wp-config.php file in your root directory and add the code below. <br 
     $_SERVER['HTTPS'] = 'on';
 }`
 
-Credits:
+# Credits:
 This was made possible with inputs from:
 @guillaume and @neutrinou from Varnish Cache discord forum
 and Andy Baugh from cPanel forums.
+Thank you all.
