@@ -18,7 +18,7 @@ You can go to https://github.com/turnuphosting/cPanel-plugin-to-flush-varnish-ca
 
 # For WordPress users:
 You can easily clear the Varnish cache using this plugin https://wordpress.org/plugins/varnish-http-purge.
-Edit your wp-config.php file in your root directory and add the code below.
+Edit your wp-config.php file in your root directory and add the code below. <br />
 `if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
     $_SERVER['HTTPS'] = 'on';
 }`
