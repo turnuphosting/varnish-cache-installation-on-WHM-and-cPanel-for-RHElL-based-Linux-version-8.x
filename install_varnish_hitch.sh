@@ -292,12 +292,8 @@ echo "Starting and enabling Hitch..."
 systemctl start hitch
 systemctl enable hitch
 
-# Step 12: Configure Apache to use port 8080
-echo "Configuring Apache to use port 8080..."
-cp /etc/httpd/conf/httpd.conf /etc/httpd/conf/httpd.conf.bak
-sed -i 's/Listen 80/Listen 8080/' /etc/httpd/conf/httpd.conf
 
-# Step 13: Restart Apache
+# Step 12: Restart Apache
 echo "Restarting Apache..."
 systemctl restart httpd
 
