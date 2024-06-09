@@ -1,4 +1,4 @@
-.PHONY: all download run clean
+.PHONY: all download run clean uninstall
 
 # URL of the script
 SCRIPT_URL=https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/install_varnish_hitch.sh
@@ -21,3 +21,12 @@ run: download
 # Target to clean up downloaded script
 clean:
 	rm -f $(SCRIPT_NAME)
+
+# Target to stop and uninstall Varnish and Hitch
+uninstall:
+	sudo systemctl stop varnish
+	sudo systemctl stop hitch
+	sudo dnf remove varnish -y
+	sudo dnf remove hitch -y
+	sudo systemctl daemon-reload
+	sudo systemctl restart httpd
