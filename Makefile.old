@@ -1,0 +1,191 @@
+.PHONY: all install install-full install-cpanel install-plugin download run setup-cron clean uninstall validate help
+
+# URLs for scripts
+INSTALL_SCRIPT_URL=https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/install_varnish_hitch.sh
+UPDATE_SCRIPT_URL=https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/update_hitch_certs.sh
+CPANEL_CONFIG_URL=https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/configure_varnish_cpanel.sh
+VALIDATE_SCRIPT_URL=https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/validate_varnish_config.sh
+PLUGIN_INSTALLER_URL=https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/install_whm_plugin.sh
+
+# Script file names
+INSTALL_SCRIPT_NAME=install_varnish_hitch.sh
+UPDATE_SCRIPT_NAME=update_hitch_certs.sh
+CPANEL_CONFIG_NAME=configure_varnish_cpanel.sh
+VALIDATE_SCRIPT_NAME=validate_varnish_config.sh
+PLUGIN_INSTALLER_NAME=install_whm_plugin.sh
+
+# Default target - show help
+all: help
+
+# Easy installation aliases
+install: install-full
+install-full: download run setup-cron install-plugin
+install-cpanel: download-cpanel configure-cpanel
+install-plugin: download-plugin setup-plugin
+
+# Target to download all scripts
+download:
+	@echo "📥 Downloading installation scripts..."
+	curl -O $(INSTALL_SCRIPT_URL)
+	curl -O $(UPDATE_SCRIPT_URL)
+	curl -O $(CPANEL_CONFIG_URL)
+	curl -O $(VALIDATE_SCRIPT_URL)
+	curl -O $(PLUGIN_INSTALLER_URL)
+	@echo "✅ All scripts downloaded successfully"
+
+# Target to download only cPanel configuration scripts
+download-cpanel:
+	@echo "📥 Downloading cPanel configuration scripts..."
+	curl -O $(CPANEL_CONFIG_URL)
+	curl -O $(VALIDATE_SCRIPT_URL)
+	@echo "✅ cPanel scripts downloaded successfully"
+
+# Target to download only WHM plugin installer
+download-plugin:
+	@echo "📥 Downloading WHM plugin installer..."
+	curl -O $(PLUGIN_INSTALLER_URL)
+	@echo "✅ Plugin installer downloaded successfully"
+
+# Target to make scripts executable and run full installation
+run: download
+	@echo "🚀 Starting full Varnish and Hitch installation..."
+	chmod +x $(INSTALL_SCRIPT_NAME) $(UPDATE_SCRIPT_NAME) $(CPANEL_CONFIG_NAME) $(VALIDATE_SCRIPT_NAME) $(PLUGIN_INSTALLER_NAME)
+	sudo ./$(INSTALL_SCRIPT_NAME)
+	@echo "✅ Installation completed"
+
+# Target to configure Varnish for cPanel only
+configure-cpanel: download-cpanel
+	@echo "⚙️  Configuring Varnish for cPanel..."
+	chmod +x $(CPANEL_CONFIG_NAME) $(VALIDATE_SCRIPT_NAME)
+	sudo ./$(CPANEL_CONFIG_NAME)
+	@echo "✅ cPanel configuration completed"
+
+# Target to install WHM plugin only
+setup-plugin: download-plugin
+	@echo "🔌 Installing WHM Varnish Cache Manager plugin..."
+	chmod +x $(PLUGIN_INSTALLER_NAME)
+	sudo ./$(PLUGIN_INSTALLER_NAME)
+	@echo "✅ WHM plugin installation completed"
+
+# Target to validate configuration
+validate: 
+	@if [ -f $(VALIDATE_SCRIPT_NAME) ]; then \
+		echo "🔍 Validating Varnish configuration..."; \
+		chmod +x $(VALIDATE_SCRIPT_NAME); \
+		sudo ./$(VALIDATE_SCRIPT_NAME); \
+	else \
+		echo "❌ Validation script not found. Run 'make download' first."; \
+		exit 1; \
+	fi
+
+# Target to setup the cron job for certificate updates
+setup-cron:
+	@echo "⏰ Setting up automatic certificate updates..."
+	crontab -l > mycron 2>/dev/null || true
+	@if ! grep -q "$(UPDATE_SCRIPT_NAME)" mycron; then \
+		echo "*/5 * * * * $(PWD)/$(UPDATE_SCRIPT_NAME)" >> mycron; \
+		crontab mycron; \
+		echo "✅ Cron job added for certificate updates"; \
+	else \
+		echo "ℹ️  Cron job already exists"; \
+	fi
+	rm -f mycron
+
+# Target to clean up downloaded scripts
+clean:
+	@echo "🧹 Cleaning up temporary files..."
+	rm -f $(INSTALL_SCRIPT_NAME) $(UPDATE_SCRIPT_NAME) $(CPANEL_CONFIG_NAME) $(VALIDATE_SCRIPT_NAME) $(PLUGIN_INSTALLER_NAME)
+	rm -f mycron
+	@echo "✅ Cleanup completed"
+
+# Check installation status
+status:
+	@echo "📊 Running installation status check..."
+	@chmod +x check-status.sh
+	@./check-status.sh
+
+.PHONY: help install install-cpanel install-plugin validate setup-cron uninstall clean status
+
+# Enhanced uninstall target
+uninstall:
+	@echo "🗑️  Uninstalling Varnish and Hitch..."
+	@echo "⚠️  This will:"
+	@echo "   - Stop Varnish and Hitch services"
+	@echo "   - Remove Varnish and Hitch packages"
+	@echo "   - Remove WHM plugin"
+	@echo "   - Remove cron jobs"
+	@echo "   - Restore Apache to default ports"
+	@echo ""
+	@read -p "Are you sure you want to continue? [y/N]: " confirm; \
+	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
+		echo "Proceeding with uninstallation..."; \
+		sudo systemctl stop varnish 2>/dev/null || true; \
+		sudo systemctl stop hitch 2>/dev/null || true; \
+		sudo systemctl disable varnish 2>/dev/null || true; \
+		sudo systemctl disable hitch 2>/dev/null || true; \
+		sudo dnf remove varnish hitch -y 2>/dev/null || sudo yum remove varnish hitch -y 2>/dev/null || true; \
+		if [ -f /etc/httpd/conf/httpd.conf.backup.* ]; then \
+			echo "Restoring Apache configuration..."; \
+			sudo cp /etc/httpd/conf/httpd.conf.backup.* /etc/httpd/conf/httpd.conf 2>/dev/null || \
+			sudo sed -i 's/Listen 8080/Listen 80/g' /etc/httpd/conf/httpd.conf 2>/dev/null || true; \
+		fi; \
+		if [ -f /usr/local/cpanel/whostmgr/docroot/cgi/varnish/remove_plugin.sh ]; then \
+			echo "Removing WHM plugin..."; \
+			sudo /usr/local/cpanel/whostmgr/docroot/cgi/varnish/remove_plugin.sh 2>/dev/null || true; \
+		fi; \
+		sudo systemctl daemon-reload; \
+		sudo systemctl restart httpd 2>/dev/null || true; \
+		crontab -l 2>/dev/null | grep -v "$(UPDATE_SCRIPT_NAME)" | crontab - 2>/dev/null || true; \
+		echo "✅ Uninstallation completed"; \
+		echo "ℹ️  Note: You may need to update WHM settings to restore Apache ports to 80/443"; \
+	else \
+		echo "❌ Uninstallation cancelled"; \
+	fi
+
+# Help target
+help:
+	@echo "🚀 Varnish Cache Installation for WHM/cPanel"
+	@echo "=============================================="
+	@echo ""
+	@echo "📋 Available Commands:"
+	@echo ""
+	@echo "🔧 Installation Options:"
+	@echo "  make install          - Full installation (Varnish + Hitch + cPanel config + WHM plugin)"
+	@echo "  make install-full     - Same as 'make install'"
+	@echo "  make install-cpanel   - Configure existing Varnish for cPanel only"
+	@echo "  make install-plugin   - Install WHM plugin only"
+	@echo ""
+	@echo "🔍 Validation & Maintenance:"
+	@echo "  make validate         - Check if Varnish is properly configured"
+	@echo "  make setup-cron       - Setup automatic SSL certificate updates"
+	@echo "  make setup-plugin     - Install WHM Varnish Cache Manager plugin"
+	@echo ""
+	@echo "🧹 Cleanup:"
+	@echo "  make clean           - Remove downloaded script files"
+	@echo "  make uninstall       - Complete removal of Varnish, Hitch, and WHM plugin"
+	@echo ""
+	@echo "📖 Individual Steps (Advanced):"
+	@echo "  make download        - Download all installation scripts"
+	@echo "  make download-cpanel - Download only cPanel configuration scripts"
+	@echo "  make download-plugin - Download only WHM plugin installer"
+	@echo "  make run             - Run full installation (after download)"
+	@echo "  make configure-cpanel- Configure Varnish for cPanel (after download-cpanel)"
+	@echo ""
+	@echo "💡 Quick Start Examples:"
+	@echo "  Fresh installation:     make install"
+	@echo "  Configure existing:     make install-cpanel"
+	@echo "  Add WHM plugin:         make install-plugin"
+	@echo "  Check configuration:    make validate"
+	@echo "  Remove everything:      make uninstall"
+	@echo ""
+	@echo "🎯 New WHM Plugin Features:"
+	@echo "  • Real-time performance dashboard with beautiful UI"
+	@echo "  • Live charts and analytics"
+	@echo "  • Domain-specific cache management"
+	@echo "  • Security status monitoring"
+	@echo "  • Bulk cache purging with confirmation"
+	@echo "  • Configuration management interface"
+	@echo "  • Live log viewing"
+	@echo "  • Mobile-responsive design"
+	@echo ""
+	@echo "📚 Documentation: See README.md and CPANEL_CONFIGURATION_GUIDE.md"
