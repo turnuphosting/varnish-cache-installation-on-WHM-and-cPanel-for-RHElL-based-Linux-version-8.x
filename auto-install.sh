@@ -60,8 +60,11 @@ main() {
     echo -e "${GREEN}🚀 Downloading and running unified installer...${NC}"
     echo
     
-    # Download and run the unified installer with auto flag
-    curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | bash -s -- --auto
+    # Download and run the unified installer with aggressive cache busting
+    local installer_url="https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh"
+    local cache_buster
+    cache_buster=$(date +%s)
+    curl -H "Cache-Control: no-cache" -H "Pragma: no-cache" -sSL "${installer_url}?cb=${cache_buster}" | bash -s -- --auto
 }
 
 # Run main function
