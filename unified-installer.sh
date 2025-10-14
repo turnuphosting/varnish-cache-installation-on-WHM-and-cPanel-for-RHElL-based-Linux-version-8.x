@@ -295,18 +295,45 @@ install_whm_plugin() {
     if [ "$HAS_CPANEL" = true ]; then
         log "INFO" "${BLUE}🎮 Installing WHM management plugin...${NC}"
         
-        # Create WHM plugin directory
-        mkdir -p /usr/local/cpanel/whm/docroot/cgi/varnish
-        
-        # Install plugin files
-        cp whm_varnish_manager.cgi /usr/local/cpanel/whm/docroot/cgi/varnish/
-        cp varnish_ajax.cgi /usr/local/cpanel/whm/docroot/cgi/varnish/
-        chmod +x /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi
-        
-        # Register plugin with WHM
-        mkdir -p /usr/local/cpanel/whm/addonfeatures
-        if [ ! -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
-            cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF'
+        # Wrap in error handling to prevent script failure
+        (
+            # Create WHM plugin directory
+            mkdir -p /usr/local/cpanel/whm/docroot/cgi/varnish || {
+                log "ERROR" "${RED}❌ Failed to create WHM plugin directory${NC}"
+                exit 1
+            }
+            
+            # Install plugin files
+            cp whm_varnish_manager.cgi /usr/local/cpanel/whm/docroot/cgi/varnish/ || {
+                log "ERROR" "${RED}❌ Failed to copy WHM manager script${NC}"
+                exit 1
+            }
+            
+            cp varnish_ajax.cgi /usr/local/cpanel/whm/docroot/cgi/varnish/ || {
+                log "ERROR" "${RED}❌ Failed to copy AJAX handler script${NC}"
+                exit 1
+            }
+            
+            chmod +x /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi || {
+                log "ERROR" "${RED}❌ Failed to set execute permissions${NC}"
+                exit 1
+            }
+            
+            # Register plugin with WHM using correct cPanel method
+            # Create addon feature directories
+            mkdir -p /usr/local/cpanel/whm/addonfeatures || {
+                log "ERROR" "${RED}❌ Failed to create addon features directory${NC}"
+                exit 1
+            }
+            
+            mkdir -p /usr/local/cpanel/base/frontend/manager2/addon_plugins || true
+            
+            # Register the addon feature file
+            if [ ! -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
+                cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF' || {
+                    log "ERROR" "${RED}❌ Failed to create addon feature file${NC}"
+                    exit 1
+                }
 ---
 group: System
 name: Varnish Cache Manager
@@ -314,6 +341,36 @@ url: /cgi/varnish/whm_varnish_manager.cgi
 icon: /whm/addon_plugins/park_wrapper_24.gif
 description: Manage Varnish Cache with real-time performance monitoring
 EOF
+            fi
+            
+        ) && {
+            log "INFO" "${GREEN}✅ WHM plugin installed successfully${NC}"
+        } || {
+            log "WARN" "${YELLOW}⚠️ WHM plugin installation encountered issues, but Varnish is still functional${NC}"
+            log "INFO" "${CYAN}💡 You can access Varnish via command line or manually configure WHM access${NC}"
+        }
+        
+        # Alternative registration method for older cPanel versions
+        if [ ! -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
+            log "WARN" "${YELLOW}⚠️ Primary addon registration failed, trying alternative method...${NC}"
+            
+            # Try creating the file with explicit permissions
+            touch /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || {
+                log "ERROR" "${RED}❌ Cannot create addon feature file - cPanel addon system may not be available${NC}"
+                log "INFO" "${CYAN}💡 WHM plugin can be manually enabled later via WHM interface${NC}"
+            }
+            
+            if [ -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
+                cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF2'
+---
+group: System
+name: Varnish Cache Manager
+url: /cgi/varnish/whm_varnish_manager.cgi
+icon: /whm/addon_plugins/park_wrapper_24.gif
+description: Manage Varnish Cache with real-time performance monitoring
+EOF2
+                chmod 644 /usr/local/cpanel/whm/addonfeatures/varnish
+            fi
         fi
         
         # Rebuild WHM addon cache and restart services
@@ -325,7 +382,8 @@ EOF
             systemctl reload cpanel 2>/dev/null || true
         fi
         
-        log "INFO" "${GREEN}✅ WHM plugin installed${NC}"
+    else
+        log "INFO" "${CYAN}📝 cPanel/WHM not detected - skipping WHM plugin installation${NC}"
     fi
 }
 
