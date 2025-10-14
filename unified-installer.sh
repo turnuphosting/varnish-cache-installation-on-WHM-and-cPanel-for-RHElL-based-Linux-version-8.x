@@ -291,6 +291,98 @@ EOF
     log "INFO" "${GREEN}✅ System configured${NC}"
 }
 
+configure_hitch_tls() {
+    log "INFO" "${BLUE}🔐 Configuring Hitch TLS termination...${NC}"
+
+    local hitch_conf="/etc/hitch/hitch.conf"
+    local cert_dir="/etc/hitch/certs"
+    local apache_conf=""
+    local pem_entries=()
+
+    mkdir -p "$cert_dir" "$cert_dir/ocsp"
+
+    if [ -f /etc/apache2/conf/httpd.conf ]; then
+        apache_conf="/etc/apache2/conf/httpd.conf"
+    elif [ -f /etc/httpd/conf/httpd.conf ]; then
+        apache_conf="/etc/httpd/conf/httpd.conf"
+    fi
+
+    if [ -n "$apache_conf" ]; then
+        while IFS='|' read -r cert key; do
+            # Ensure both certificate and key exist before proceeding
+            if [ -f "$cert" ] && [ -f "$key" ]; then
+                local name
+                name=$(basename "${cert%.*}")
+                local combined="$cert_dir/${name}.pem"
+
+                cat "$cert" "$key" > "$combined" 2>/dev/null || true
+                chmod 600 "$combined" 2>/dev/null || true
+                chown hitch:hitch "$combined" 2>/dev/null || true
+                pem_entries+=("$combined")
+            fi
+        done < <(
+            awk '
+                /SSLCertificateFile/ {cert=$2}
+                /SSLCertificateKeyFile/ && cert {printf "%s|%s\n", cert, $2; cert=""}
+            ' "$apache_conf" | sort -u
+        )
+    fi
+
+    # Fallback to cPanel service certificate if no vhost certificates detected
+    if [ ${#pem_entries[@]} -eq 0 ]; then
+        if [ -f /var/cpanel/ssl/cpanel/cpanel.pem ]; then
+            cp /var/cpanel/ssl/cpanel/cpanel.pem "$cert_dir/cpanel.pem" 2>/dev/null || true
+            chmod 600 "$cert_dir/cpanel.pem" 2>/dev/null || true
+            chown hitch:hitch "$cert_dir/cpanel.pem" 2>/dev/null || true
+            pem_entries+=("$cert_dir/cpanel.pem")
+        elif [ -f /etc/pki/tls/certs/localhost.crt ] && [ -f /etc/pki/tls/private/localhost.key ]; then
+            cat /etc/pki/tls/certs/localhost.crt /etc/pki/tls/private/localhost.key > "$cert_dir/localhost.pem" 2>/dev/null || true
+            chmod 600 "$cert_dir/localhost.pem" 2>/dev/null || true
+            chown hitch:hitch "$cert_dir/localhost.pem" 2>/dev/null || true
+            pem_entries+=("$cert_dir/localhost.pem")
+        fi
+    fi
+
+    cat > "$hitch_conf" <<EOF
+frontend = "[*]:443"
+backend = "[127.0.0.1]:8443"
+workers = $((CPU_CORES < 4 ? 4 : CPU_CORES))
+daemon = on
+user = "hitch"
+group = "hitch"
+write-proxy-v2 = on
+alpn-protos = "h2,http/1.1"
+tls-protos = TLSv1.2 TLSv1.3
+ciphers = "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH"
+ocsp-dir = "$cert_dir/ocsp"
+backend-connect-timeout = 5
+keepalive = 3600
+EOF
+
+    if [ ${#pem_entries[@]} -gt 0 ]; then
+        for pem in "${pem_entries[@]}"; do
+            echo "pem-file = \"$pem\"" >> "$hitch_conf"
+        done
+        log "INFO" "${GREEN}✅ Hitch certificates configured (${#pem_entries[@]} detected)${NC}"
+    else
+        echo "# pem-files will be added automatically by update_hitch_certs.sh" >> "$hitch_conf"
+        log "WARN" "${YELLOW}⚠️ No SSL certificates detected. Hitch will start with placeholder config.${NC}"
+    fi
+
+    chown hitch:hitch "$hitch_conf" 2>/dev/null || true
+    chmod 640 "$hitch_conf" 2>/dev/null || true
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable hitch &>/dev/null || true
+    systemctl restart hitch &>/dev/null || true
+
+    if systemctl is-active --quiet hitch; then
+        log "INFO" "${GREEN}✅ Hitch service is active${NC}"
+    else
+        log "WARN" "${YELLOW}⚠️ Hitch service failed to start. Check /var/log/messages for details.${NC}"
+    fi
+}
+
 install_whm_plugin() {
     if [ "$HAS_CPANEL" = true ]; then
         log "INFO" "${BLUE}🎮 Installing WHM management plugin...${NC}"
@@ -314,56 +406,80 @@ install_whm_plugin() {
         
         chmod +x /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
         
-        # Register plugin with WHM using correct cPanel method
-        mkdir -p /usr/local/cpanel/whm/addonfeatures 2>/dev/null || true
-        mkdir -p /usr/local/cpanel/base/frontend/manager2/addon_plugins 2>/dev/null || true
-        
-        # Register the addon feature file
-        if [ ! -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
-            cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF'
----
+        # Register plugin using AppConfig for Jupiter/Glass UI compatibility
+        local appconfig_dir="/var/cpanel/apps"
+        local appconfig_file="$appconfig_dir/varnish_cache_manager.conf"
+        mkdir -p "$appconfig_dir" 2>/dev/null || true
+        cat > "$appconfig_file" <<'EOF'
+name: varnish_cache_manager
+displayname: Varnish Cache Manager
+version: 2.0
+priority: 10
+category: software
+service: whostmgr
 group: System
-name: Varnish Cache Manager
-url: /cgi/varnish/whm_varnish_manager.cgi
-icon: /whm/addon_plugins/park_wrapper_24.gif
-description: Manage Varnish Cache with real-time performance monitoring
+feature: varnish_cache_manager
+navigations:
+  - name: Varnish Cache Manager
+    url: /cgi/varnish/whm_varnish_manager.cgi
+    description: Manage Varnish Cache with real-time performance monitoring
+    category: software
+    icon: chart-area
 EOF
-            if [ $? -ne 0 ]; then
-                log "WARN" "${YELLOW}⚠️ Failed to create addon feature file - continuing without plugin${NC}"
-                return 0
-            fi
-        fi
-        
-        # Alternative registration method for older cPanel versions
-        if [ ! -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
-            log "WARN" "${YELLOW}⚠️ Primary addon registration failed, trying alternative method...${NC}"
-            
-            # Try creating the file with explicit permissions
-            if ! touch /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null; then
-                log "WARN" "${YELLOW}⚠️ Cannot create addon feature file - WHM plugin installation skipped${NC}"
-                log "INFO" "${CYAN}💡 Varnish is fully functional, WHM plugin can be configured manually${NC}"
-                return 0
-            fi
-            
-            if [ -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
-                cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF2'
----
-group: System
+
+        # Legacy addon registration for Paper Lantern / older WHM menu
+        mkdir -p /var/cpanel/whm/addon_plugins 2>/dev/null || true
+        cat > /var/cpanel/whm/addon_plugins/varnish.conf <<'EOF'
 name: Varnish Cache Manager
+version: 2.0
 url: /cgi/varnish/whm_varnish_manager.cgi
-icon: /whm/addon_plugins/park_wrapper_24.gif
-description: Manage Varnish Cache with real-time performance monitoring
-EOF2
-                chmod 644 /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || true
-            fi
+category: software
+desc: Manage Varnish Cache with real-time performance monitoring
+EOF
+        chmod 644 /var/cpanel/whm/addon_plugins/varnish.conf 2>/dev/null || true
+
+                # Add dynamic UI entries for modern WHM themes
+                for theme in jupiter glass; do
+                        local dynamic_dir="/usr/local/cpanel/base/frontend/${theme}/dynamicui"
+                        if [ -d "$dynamic_dir" ]; then
+                                cat > "$dynamic_dir/varnish_cache_manager.json" <<'EOF'
+{
+    "item": {
+        "name": "varnish_cache_manager",
+        "type": "link",
+        "data": {
+            "href": "/cgi/varnish/whm_varnish_manager.cgi",
+            "target": "self"
+        },
+        "metadata": {
+            "label": "Varnish Cache Manager",
+            "category": "software",
+            "icon": "chart-area"
+        }
+    }
+}
+EOF
+                                chmod 644 "$dynamic_dir/varnish_cache_manager.json" 2>/dev/null || true
+                        fi
+                done
+
+        # Rebuild WHM caches and restart cPanel services to pick up new plugin
+        if command -v /usr/local/cpanel/bin/unregister_appconfig >/dev/null 2>&1; then
+            /usr/local/cpanel/bin/unregister_appconfig varnish_cache_manager >/dev/null 2>&1 || true
         fi
-        
-        # Rebuild WHM addon cache and restart services
-        if command -v /scripts/rebuildhttpdconf >/dev/null 2>&1; then
-            /scripts/rebuildhttpdconf >/dev/null 2>&1 || true
+
+        if [ -x /usr/local/cpanel/bin/register_appconfig ]; then
+            /usr/local/cpanel/bin/register_appconfig "$appconfig_file" >/dev/null 2>&1 || \
+                log "WARN" "${YELLOW}⚠️ Failed to register AppConfig. Plugin may need manual registration.${NC}"
         fi
-        
-        if command -v systemctl >/dev/null 2>&1; then
+
+        if command -v /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1; then
+            /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1 || true
+        fi
+
+        if command -v /usr/local/cpanel/bin/restartsrv_cpsrvd >/dev/null 2>&1; then
+            /usr/local/cpanel/bin/restartsrv_cpsrvd >/dev/null 2>&1 || true
+        else
             systemctl reload cpanel 2>/dev/null || true
         fi
         
@@ -387,8 +503,14 @@ start_services() {
     systemctl restart hitch &>/dev/null || true
     
     # Verify services
+    if systemctl is-active --quiet hitch; then
+        log "INFO" "${GREEN}✓ Hitch is active${NC}"
+    else
+        log "WARN" "${YELLOW}⚠️ Hitch is not active. SSL termination may not be available until certificates are configured.${NC}"
+    fi
+    
     if systemctl is-active --quiet httpd && systemctl is-active --quiet varnish; then
-        log "INFO" "${GREEN}✅ All services started successfully${NC}"
+        log "INFO" "${GREEN}✅ Core services started successfully${NC}"
     else
         log "ERROR" "${RED}❌ Service startup failed${NC}"
         return 1
@@ -482,6 +604,7 @@ full_installation() {
     download_and_setup
     install_varnish_and_hitch
     configure_system
+    configure_hitch_tls
     install_whm_plugin
     start_services
     run_performance_optimization
@@ -502,6 +625,7 @@ performance_installation() {
     download_and_setup
     install_varnish_and_hitch
     configure_system
+    configure_hitch_tls
     install_whm_plugin
     run_performance_optimization
     start_services
@@ -518,6 +642,7 @@ cpanel_configuration() {
     detect_system
     download_and_setup
     configure_system
+    configure_hitch_tls
     install_whm_plugin
     systemctl restart httpd varnish
     validate_installation
