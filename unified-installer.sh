@@ -304,6 +304,7 @@ install_whm_plugin() {
         chmod +x /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi
         
         # Register plugin with WHM
+        mkdir -p /usr/local/cpanel/whm/addonfeatures
         if [ ! -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
             cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF'
 ---
@@ -313,6 +314,15 @@ url: /cgi/varnish/whm_varnish_manager.cgi
 icon: /whm/addon_plugins/park_wrapper_24.gif
 description: Manage Varnish Cache with real-time performance monitoring
 EOF
+        fi
+        
+        # Rebuild WHM addon cache and restart services
+        if command -v /scripts/rebuildhttpdconf >/dev/null 2>&1; then
+            /scripts/rebuildhttpdconf >/dev/null 2>&1 || true
+        fi
+        
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl reload cpanel 2>/dev/null || true
         fi
         
         log "INFO" "${GREEN}✅ WHM plugin installed${NC}"
