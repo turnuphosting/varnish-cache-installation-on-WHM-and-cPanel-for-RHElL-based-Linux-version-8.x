@@ -330,10 +330,7 @@ install_whm_plugin() {
             
             # Register the addon feature file
             if [ ! -f /usr/local/cpanel/whm/addonfeatures/varnish ]; then
-                cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF' || {
-                    log "ERROR" "${RED}❌ Failed to create addon feature file${NC}"
-                    exit 1
-                }
+                cat > /usr/local/cpanel/whm/addonfeatures/varnish << 'EOF'
 ---
 group: System
 name: Varnish Cache Manager
@@ -341,6 +338,10 @@ url: /cgi/varnish/whm_varnish_manager.cgi
 icon: /whm/addon_plugins/park_wrapper_24.gif
 description: Manage Varnish Cache with real-time performance monitoring
 EOF
+                if [ $? -ne 0 ]; then
+                    log "ERROR" "${RED}❌ Failed to create addon feature file${NC}"
+                    exit 1
+                fi
             fi
             
         ) && {
