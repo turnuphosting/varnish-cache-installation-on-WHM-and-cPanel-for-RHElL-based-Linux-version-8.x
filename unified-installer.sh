@@ -528,10 +528,34 @@ main() {
         exit 0
     fi
     
-    # Interactive mode
+    # Check if running in non-interactive mode (piped from curl)
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        log "INFO" "${CYAN}🚀 Detected non-interactive mode (curl | bash). Starting automatic full installation...${NC}"
+        log "INFO" "${WHITE}📋 This will install:${NC}"
+        log "INFO" "${WHITE}   • Varnish Cache with LiteSpeed-level optimizations${NC}"
+        log "INFO" "${WHITE}   • Hitch SSL termination${NC}"
+        log "INFO" "${WHITE}   • Apache port reconfiguration (8080)${NC}"
+        log "INFO" "${WHITE}   • Beautiful WHM management plugin${NC}"
+        log "INFO" "${WHITE}   • Real-time performance monitoring${NC}"
+        echo
+        log "INFO" "${YELLOW}⏳ Installation will begin in 5 seconds... (Press Ctrl+C to cancel)${NC}"
+        sleep 5
+        full_installation
+        exit 0
+    fi
+    
+    # Interactive mode only when we have a proper terminal
     while true; do
         show_installation_menu
-        read -p "Enter your choice (1-8): " choice
+        
+        # Check if we can read from terminal
+        if ! read -t 30 -p "Enter your choice (1-8) [default: 1]: " choice; then
+            log "INFO" "${CYAN}⏰ No input received. Defaulting to full installation...${NC}"
+            choice=1
+        fi
+        
+        # Default to option 1 if no choice provided
+        choice=${choice:-1}
         echo
         
         case $choice in

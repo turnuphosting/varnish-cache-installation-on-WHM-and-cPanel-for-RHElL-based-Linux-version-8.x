@@ -4,13 +4,20 @@
 
 ## ⚡ **LIGHTNING-FAST INSTALLATION (30 seconds)**
 
-**🌟 ULTIMATE ONE-LINER - OPTIMIZED FOR MAXIMUM PERFORMANCE:**
+**🌟 AUTOMATIC ONE-LINER - ZERO PROMPTS:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/auto-install.sh | sudo bash
+```
+
+**🎛️ SMART INSTALLER - AUTO-DETECTS TERMINAL:**
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash
 ```
+*Automatically runs full installation when piped, interactive when run directly*
 
-**That's it!** ✨ This single command provides:
+**That's it!** ✨ Both commands provide:
 - 🏆 **LiteSpeed-level performance or better**
 - 🎮 **Beautiful WHM management interface**
 - 🔒 **Advanced security with DDoS protection**
@@ -55,33 +62,41 @@ curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installa
 
 ## 🎛️ **INSTALLATION OPTIONS**
 
-The unified installer provides multiple installation modes:
+The installer provides multiple installation modes to suit different needs:
 
-### **1. 🚀 Full Installation (Recommended)**
-Complete setup with all optimizations:
+### **1. 🚀 Automatic Installation (Zero Prompts)**
+Perfect for automated deployments and scripts:
+```bash
+curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/auto-install.sh | sudo bash
+```
+
+### **2. 🎛️ Smart Unified Installer**
+Auto-detects environment and runs appropriately:
 ```bash
 curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash
 ```
+- **Via curl**: Automatically runs full installation
+- **Direct download**: Shows interactive menu
 
-### **2. ⚡ Performance-Only Installation**
+### **3. ⚡ Performance-Only Installation**
 Maximum performance optimizations:
 ```bash
 curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash -s -- --performance
 ```
 
-### **3. 🎮 Interactive Installation**
+### **4. 🎮 Interactive Installation**
 Choose specific components:
 ```bash
 curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/easy-install.sh | sudo bash
 ```
 
-### **4. 🗑️ Easy Uninstallation**
+### **5. 🗑️ Easy Uninstallation**
 Complete removal with system restoration:
 ```bash
 curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/easy-uninstall.sh | sudo bash
 ```
 
-### **5. 📊 Status Check**
+### **6. 📊 Status Check**
 Monitor installation and get recommendations:
 ```bash
 curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/check-status.sh | sudo bash
