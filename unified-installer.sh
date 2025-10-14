@@ -239,28 +239,57 @@ install_varnish_and_hitch() {
     log "INFO" "${GREEN}✅ Varnish and Hitch installed${NC}"
 }
 
+configure_apache_ports() {
+    local apache_conf=""
+
+    if [ "$HAS_CPANEL" = true ] && command -v whmapi1 >/dev/null 2>&1; then
+        log "INFO" "${CYAN}🔧 Configuring Apache ports via WHM API...${NC}"
+        whmapi1 set_tweaksetting key=apache_port value=0.0.0.0:8080 >/dev/null 2>&1 || \
+            log "WARN" "${YELLOW}⚠️ Unable to set Apache HTTP port via WHM API${NC}"
+        whmapi1 set_tweaksetting key=apache_ssl_port value=0.0.0.0:8443 >/dev/null 2>&1 || \
+            log "WARN" "${YELLOW}⚠️ Unable to set Apache HTTPS port via WHM API${NC}"
+
+        if command -v /scripts/rebuildhttpdconf >/dev/null 2>&1; then
+            /scripts/rebuildhttpdconf >/dev/null 2>&1 || \
+                log "WARN" "${YELLOW}⚠️ Failed to rebuild Apache configuration via WHM scripts${NC}"
+        fi
+    else
+        if [ -f /etc/httpd/conf/httpd.conf ]; then
+            apache_conf="/etc/httpd/conf/httpd.conf"
+        elif [ -f /etc/apache2/conf/httpd.conf ]; then
+            apache_conf="/etc/apache2/conf/httpd.conf"
+        fi
+
+        if [ -n "$apache_conf" ]; then
+            cp "$apache_conf" "${apache_conf}.backup.$(date +%Y%m%d)" 2>/dev/null || true
+            sed -i -E 's/^Listen\s+80(\b|$)/Listen 8080/' "$apache_conf"
+            sed -i -E 's/^Listen\s+443(\b|$)/Listen 8443/' "$apache_conf"
+            sed -i -E 's/<VirtualHost\s+\S*:443>/<VirtualHost *:8443>/g' "$apache_conf"
+
+            if ! grep -Eq '^Listen\s+8080' "$apache_conf"; then
+                echo "Listen 8080" >> "$apache_conf"
+            fi
+            if ! grep -Eq '^Listen\s+8443' "$apache_conf"; then
+                echo "Listen 8443" >> "$apache_conf"
+            fi
+        fi
+    fi
+}
+
 configure_system() {
     log "INFO" "${BLUE}⚙️ Configuring system for optimal performance...${NC}"
     
     show_progress 7 8 "Applying system optimizations"
-    
+
     # Get server IP
     SERVER_IP=$(hostname -I | awk '{print $1}' || curl -s ifconfig.me || echo "127.0.0.1")
     
-    # Configure Apache
-    if [ -f /etc/httpd/conf/httpd.conf ]; then
-        cp /etc/httpd/conf/httpd.conf /etc/httpd/conf/httpd.conf.backup.$(date +%Y%m%d)
-        sed -i 's/^Listen 80$/Listen 8080/' /etc/httpd/conf/httpd.conf
-        
-        if ! grep -q "Listen 8080" /etc/httpd/conf/httpd.conf; then
-            echo "Listen 8080" >> /etc/httpd/conf/httpd.conf
-        fi
-    fi
-    
+    configure_apache_ports
+
     # Install optimized VCL
     cp optimized-default.vcl /etc/varnish/default.vcl
     sed -i "s/Replace it with Your System IP's Address/$SERVER_IP/g" /etc/varnish/default.vcl
-    
+
     # Configure Varnish systemd service
     mkdir -p /etc/systemd/system/varnish.service.d
     cat > /etc/systemd/system/varnish.service.d/override.conf << EOF
@@ -372,13 +401,9 @@ EOF
 
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable hitch &>/dev/null || true
-    systemctl restart hitch &>/dev/null || true
-
-    if systemctl is-active --quiet hitch; then
-        log "INFO" "${GREEN}✅ Hitch service is active${NC}"
-    else
-        log "WARN" "${YELLOW}⚠️ Hitch service failed to start. Check /var/log/messages for details.${NC}"
-    fi
+    systemctl stop hitch &>/dev/null || true
+    
+    log "INFO" "${CYAN}ℹ️ Hitch configuration prepared. Service will restart after Apache reload.${NC}"
 }
 
 install_whm_plugin() {
@@ -404,26 +429,37 @@ install_whm_plugin() {
         
         chmod +x /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
         
-        # Register plugin using AppConfig for Jupiter/Glass UI compatibility
-        local appconfig_dir="/var/cpanel/apps"
-        local appconfig_file="$appconfig_dir/varnish_cache_manager.conf"
-        mkdir -p "$appconfig_dir" 2>/dev/null || true
-                cat > "$appconfig_file" <<'EOF'
-name: varnish_cache_manager
-displayname: Varnish Cache Manager
-version: 2.0
-service: whostmgr
-category: software
-group: System
-feature: varnish_cache_manager
-items:
-    - item: varnish_cache_manager
-        type: link
-        name: Varnish Cache Manager
-        url: /cgi/varnish/whm_varnish_manager.cgi
-        description: Manage Varnish Cache with real-time performance monitoring
-        category: software
+        # Register plugin using AppConfig for modern WHM themes
+        local appconfig_tmp
+        appconfig_tmp=$(mktemp /tmp/varnish_appconfig.XXXX.conf)
+        cat > "$appconfig_tmp" <<'EOF'
+name=varnish_cache_manager
+displayname=Varnish Cache Manager
+version=2.0
+service=whostmgr
+group=System
+category=software
+feature=varnish_cache_manager
+acls=any
+url=/cgi/varnish/whm_varnish_manager.cgi
+entryurl=/cgi/varnish/whm_varnish_manager.cgi
+target=_self
+icon=chart-area
 EOF
+
+        if command -v /usr/local/cpanel/bin/unregister_appconfig >/dev/null 2>&1; then
+            /usr/local/cpanel/bin/unregister_appconfig varnish_cache_manager >/dev/null 2>&1 || true
+        fi
+
+        if [ -x /usr/local/cpanel/bin/register_appconfig ]; then
+            if /usr/local/cpanel/bin/register_appconfig "$appconfig_tmp" >/dev/null 2>&1; then
+                log "INFO" "${GREEN}✓ WHM AppConfig registered${NC}"
+            else
+                log "WARN" "${YELLOW}⚠️ Failed to register AppConfig. Plugin may need manual registration.${NC}"
+            fi
+        fi
+
+        rm -f "$appconfig_tmp"
 
         # Legacy addon registration for Paper Lantern / older WHM menu
         mkdir -p /var/cpanel/whm/addon_plugins 2>/dev/null || true
@@ -436,11 +472,11 @@ desc: Manage Varnish Cache with real-time performance monitoring
 EOF
         chmod 644 /var/cpanel/whm/addon_plugins/varnish.conf 2>/dev/null || true
 
-                # Add dynamic UI entries for modern WHM themes
-                for theme in jupiter glass; do
-                        local dynamic_dir="/usr/local/cpanel/base/frontend/${theme}/dynamicui"
-                        if [ -d "$dynamic_dir" ]; then
-                                cat > "$dynamic_dir/varnish_cache_manager.json" <<'EOF'
+        # Add dynamic UI entries for modern WHM themes
+        for theme in jupiter glass; do
+            local dynamic_dir="/usr/local/cpanel/base/frontend/${theme}/dynamicui"
+            if [ -d "$dynamic_dir" ]; then
+                cat > "$dynamic_dir/varnish_cache_manager.json" <<'EOF'
 {
     "item": {
         "name": "varnish_cache_manager",
@@ -457,23 +493,13 @@ EOF
     }
 }
 EOF
-                                chmod 644 "$dynamic_dir/varnish_cache_manager.json" 2>/dev/null || true
-                        fi
-                done
+                chmod 644 "$dynamic_dir/varnish_cache_manager.json" 2>/dev/null || true
+            fi
+        done
 
-        # Rebuild WHM caches and restart cPanel services to pick up new plugin
-        if command -v /usr/local/cpanel/bin/unregister_appconfig >/dev/null 2>&1; then
-            /usr/local/cpanel/bin/unregister_appconfig varnish_cache_manager >/dev/null 2>&1 || true
-        fi
-
-        if [ -x /usr/local/cpanel/bin/register_appconfig ]; then
-            /usr/local/cpanel/bin/register_appconfig "$appconfig_file" >/dev/null 2>&1 || \
-                log "WARN" "${YELLOW}⚠️ Failed to register AppConfig. Plugin may need manual registration.${NC}"
-        fi
-
-    # Ensure addon features entry exists for legacy WHM menus
-    mkdir -p /usr/local/cpanel/whm/addonfeatures 2>/dev/null || true
-    cat > /usr/local/cpanel/whm/addonfeatures/varnish <<'EOF'
+        # Ensure addon features entry exists for legacy WHM menus
+        mkdir -p /usr/local/cpanel/whm/addonfeatures 2>/dev/null || true
+        cat > /usr/local/cpanel/whm/addonfeatures/varnish <<'EOF'
 ---
 group: System
 name: Varnish Cache Manager
@@ -481,7 +507,7 @@ url: /cgi/varnish/whm_varnish_manager.cgi
 icon: /whm/addon_plugins/park_wrapper_24.gif
 description: Manage Varnish Cache with real-time performance monitoring
 EOF
-    chmod 644 /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || true
+        chmod 644 /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || true
 
         if command -v /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1; then
             /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1 || true
