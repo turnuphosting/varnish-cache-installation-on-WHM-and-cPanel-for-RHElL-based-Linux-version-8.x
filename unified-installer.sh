@@ -355,8 +355,6 @@ alpn-protos = "h2,http/1.1"
 tls-protos = TLSv1.2 TLSv1.3
 ciphers = "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH"
 ocsp-dir = "$cert_dir/ocsp"
-backend-connect-timeout = 5
-keepalive = 3600
 EOF
 
     if [ ${#pem_entries[@]} -gt 0 ]; then
@@ -410,21 +408,21 @@ install_whm_plugin() {
         local appconfig_dir="/var/cpanel/apps"
         local appconfig_file="$appconfig_dir/varnish_cache_manager.conf"
         mkdir -p "$appconfig_dir" 2>/dev/null || true
-        cat > "$appconfig_file" <<'EOF'
+                cat > "$appconfig_file" <<'EOF'
 name: varnish_cache_manager
 displayname: Varnish Cache Manager
 version: 2.0
-priority: 10
-category: software
 service: whostmgr
+category: software
 group: System
 feature: varnish_cache_manager
-navigations:
-  - name: Varnish Cache Manager
-    url: /cgi/varnish/whm_varnish_manager.cgi
-    description: Manage Varnish Cache with real-time performance monitoring
-    category: software
-    icon: chart-area
+items:
+    - item: varnish_cache_manager
+        type: link
+        name: Varnish Cache Manager
+        url: /cgi/varnish/whm_varnish_manager.cgi
+        description: Manage Varnish Cache with real-time performance monitoring
+        category: software
 EOF
 
         # Legacy addon registration for Paper Lantern / older WHM menu
@@ -472,6 +470,18 @@ EOF
             /usr/local/cpanel/bin/register_appconfig "$appconfig_file" >/dev/null 2>&1 || \
                 log "WARN" "${YELLOW}⚠️ Failed to register AppConfig. Plugin may need manual registration.${NC}"
         fi
+
+    # Ensure addon features entry exists for legacy WHM menus
+    mkdir -p /usr/local/cpanel/whm/addonfeatures 2>/dev/null || true
+    cat > /usr/local/cpanel/whm/addonfeatures/varnish <<'EOF'
+---
+group: System
+name: Varnish Cache Manager
+url: /cgi/varnish/whm_varnish_manager.cgi
+icon: /whm/addon_plugins/park_wrapper_24.gif
+description: Manage Varnish Cache with real-time performance monitoring
+EOF
+    chmod 644 /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || true
 
         if command -v /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1; then
             /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1 || true
