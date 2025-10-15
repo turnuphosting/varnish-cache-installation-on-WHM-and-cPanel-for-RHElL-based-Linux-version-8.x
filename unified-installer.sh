@@ -121,6 +121,49 @@ ensure_asset() {
     echo "$local_path"
 }
 
+stop_service_if_present() {
+    local service_name="$1"
+    if systemctl list-unit-files "$service_name" &>/dev/null; then
+        systemctl stop "$service_name" >/dev/null 2>&1 || true
+    fi
+}
+
+describe_port_holders() {
+    local port="$1"
+    local owners=""
+    if command -v ss >/dev/null 2>&1; then
+        owners=$(ss -H -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p {print $5 " " $6}')
+    elif command -v netstat >/dev/null 2>&1; then
+        owners=$(netstat -tulpn 2>/dev/null | awk -v p=":$port" '$4 ~ p {print $4 " " $7}')
+    fi
+    echo "$owners"
+}
+
+ensure_port_free() {
+    local port="$1"
+    local description="$2"
+    local attempts=0
+    local owners
+
+    owners=$(describe_port_holders "$port")
+    while [[ -n "$owners" ]]; do
+        if (( attempts == 0 )); then
+            log WARN "Port $port ($description) is still in use by: $owners"
+            log WARN "Attempting to wait for the port to become free..."
+        fi
+
+        if (( attempts >= 5 )); then
+            fatal "Port $port ($description) remains in use. Stop the owning service(s) and re-run the installer."
+        fi
+
+        sleep 1
+        attempts=$((attempts + 1))
+        owners=$(describe_port_holders "$port")
+    done
+
+    log INFO "Port $port ready for $description"
+}
+
 get_asset_path() {
     local relative_path="$1"
     local local_candidate="$SCRIPT_DIR/$relative_path"
@@ -151,10 +194,28 @@ install_packages() {
 
 stop_conflicting_services() {
     log INFO "Stopping Apache, Varnish, and Hitch before reconfiguration"
-    systemctl stop varnish >/dev/null 2>&1 || true
-    systemctl stop hitch >/dev/null 2>&1 || true
-    systemctl stop httpd >/dev/null 2>&1 || true
-    systemctl stop apache2 >/dev/null 2>&1 || true
+    stop_service_if_present varnish.service
+    stop_service_if_present varnish
+    stop_service_if_present varnishncsa.service
+    stop_service_if_present varnishncsa
+    stop_service_if_present hitch.service
+    stop_service_if_present hitch
+    stop_service_if_present httpd.service
+    stop_service_if_present httpd
+    stop_service_if_present apache2.service
+    stop_service_if_present apache2
+    stop_service_if_present nginx.service
+    stop_service_if_present nginx
+    stop_service_if_present ea-nginx.service
+    stop_service_if_present lsws.service
+    stop_service_if_present lsws
+    stop_service_if_present lshttpd.service
+    stop_service_if_present openlitespeed.service
+    stop_service_if_present caddy.service
+
+    ensure_port_free 80 "Varnish HTTP listener"
+    ensure_port_free 443 "Hitch TLS listener"
+    ensure_port_free 4443 "Varnish TLS backend listener"
 }
 
 ensure_varnish_repo() {
@@ -383,6 +444,10 @@ restart_services() {
     else
         systemctl restart httpd
     fi
+
+    ensure_port_free 80 "Varnish HTTP listener"
+    ensure_port_free 443 "Hitch TLS listener"
+    ensure_port_free 4443 "Varnish TLS backend listener"
 
     log INFO "Enabling and restarting Varnish"
     systemctl enable varnish >/dev/null 2>&1 || true
