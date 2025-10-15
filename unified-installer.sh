@@ -724,7 +724,7 @@ start_services() {
     
     # Start services in correct order
     systemctl enable httpd varnish hitch &>/dev/null
-    systemctl restart httpd &>/dev/null
+    restart_apache
     sleep 2
     systemctl restart varnish &>/dev/null
     sleep 2
@@ -750,6 +750,16 @@ stop_services() {
     systemctl stop hitch &>/dev/null || true
     systemctl stop varnish &>/dev/null || true
     systemctl stop httpd &>/dev/null || true
+}
+
+restart_apache() {
+    if [ -x /scripts/restartsrv_httpd ]; then
+        /scripts/restartsrv_httpd --no-verbose >/dev/null 2>&1 || /scripts/restartsrv_httpd >/dev/null 2>&1 || true
+    elif [ -x /usr/local/cpanel/scripts/restartsrv_httpd ]; then
+        /usr/local/cpanel/scripts/restartsrv_httpd --no-verbose >/dev/null 2>&1 || /usr/local/cpanel/scripts/restartsrv_httpd >/dev/null 2>&1 || true
+    else
+        systemctl restart httpd &>/dev/null || true
+    fi
 }
 
 run_performance_optimization() {
@@ -876,7 +886,8 @@ cpanel_configuration() {
     configure_system
     configure_hitch_tls
     install_whm_plugin
-    systemctl restart httpd varnish
+    restart_apache
+    systemctl restart varnish &>/dev/null
     validate_installation
 }
 
@@ -937,7 +948,7 @@ uninstall_varnish() {
     fi
 
     reset_apache_ports
-    systemctl restart httpd &>/dev/null || true
+    restart_apache
 
     log "INFO" "${GREEN}✅ Uninstallation completed. Apache is back on ports 80/443.${NC}"
 }

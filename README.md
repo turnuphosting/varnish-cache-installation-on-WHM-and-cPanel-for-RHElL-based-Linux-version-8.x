@@ -155,6 +155,8 @@ The unified installer reconfigures Apache to listen on `0.0.0.0:8080` (HTTP) and
 
 The WHM plugin is deployed under `/usr/local/cpanel/whostmgr/docroot/cgi/varnish`. Configuration history and chart data live at `/var/log/varnish/varnish-manager-history.json`, and UI preferences are stored in `/etc/varnish/cpanel-manager-settings.json`.
 
+When WHM/cPanel is present, the installer restarts Apache through `/scripts/restartsrv_httpd` before Hitch is started to guarantee the correct initialization order.
+
 Manual WHM tweaks are no longer required, but you can still verify the values under **WHM → Server Configuration → Tweak Settings** if you want to confirm the change.
 
 ## 📋 Installation Options
@@ -268,7 +270,8 @@ varnishlog
 sudo varnishadm 'ban req.url ~ .'
 
 # Restart the stack
-sudo systemctl restart httpd varnish hitch
+sudo /scripts/restartsrv_httpd >/dev/null 2>&1 || sudo systemctl restart httpd
+sudo systemctl restart varnish hitch
 ```
 
 ## 🔍 Validation and Maintenance
@@ -350,8 +353,8 @@ sudo cp /etc/httpd/conf/httpd.conf.backup.* /etc/httpd/conf/httpd.conf
 # Or manually change ports back
 sudo sed -i 's/Listen 8080/Listen 80/g' /etc/httpd/conf/httpd.conf
 
-# Restart Apache
-sudo systemctl restart httpd
+# Restart Apache (uses cPanel wrapper when available)
+sudo /scripts/restartsrv_httpd >/dev/null 2>&1 || sudo systemctl restart httpd
 
 # Remove cron jobs
 crontab -l | grep -v "update_hitch_certs.sh" | crontab -
