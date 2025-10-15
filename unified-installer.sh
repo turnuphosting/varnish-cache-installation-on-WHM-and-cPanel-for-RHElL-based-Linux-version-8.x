@@ -955,10 +955,44 @@ main() {
     fi
     
     # Auto-installation mode (no interaction)
-    if [ "${1:-}" = "--auto" ] || [ "${1:-}" = "--full" ]; then
-        full_installation
-        exit 0
-    fi
+    case "${1:-}" in
+        --auto|--full)
+            full_installation
+            exit 0
+            ;;
+        --performance)
+            performance_installation
+            exit 0
+            ;;
+        --cpanel-only|--cpanel)
+            cpanel_configuration
+            exit 0
+            ;;
+        --plugin-only|--plugin)
+            whm_plugin_only
+            exit 0
+            ;;
+        --optimize-only|--optimize)
+            optimization_only
+            exit 0
+            ;;
+        --status)
+            status_check
+            exit 0
+            ;;
+        --uninstall)
+            uninstall_varnish
+            exit 0
+            ;;
+        --menu|--interactive)
+            shift
+            ;;
+        "")
+            ;;
+        *)
+            log "WARN" "${YELLOW}⚠️ Unknown flag '${1}'. Falling back to interactive mode.${NC}"
+            ;;
+    esac
     
     # Check if running in non-interactive mode (piped from curl)
     if [ ! -t 0 ] || [ ! -t 1 ]; then

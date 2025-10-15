@@ -93,6 +93,32 @@ sudo ./unified-installer.sh
 ```
 The menu includes one-click options for plugin-only setup, cPanel integration, performance tuning, health checks, and clean uninstallation.
 
+### **5. 🤖 Automation Flags**
+Prefer scripts or remote orchestration? The unified installer now understands action flags:
+
+| Flag | Action |
+|------|--------|
+| `--full` or `--auto` | Complete installation (same as piping via curl) |
+| `--performance` | Apply the high-performance profile only |
+| `--cpanel-only` | Wire existing Varnish to WHM/cPanel |
+| `--plugin-only` | Deploy the WHM dashboard without touching services |
+| `--optimize-only` | Re-run the optimization suite on an existing stack |
+| `--status` | Run the health/status report |
+| `--uninstall` | Remove Varnish, Hitch, and the WHM plugin, and restore Apache |
+
+Examples:
+
+```bash
+# Automated full install with countdown skipped
+curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash -s -- --full
+
+# Non-interactive uninstall
+curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash -s -- --uninstall
+
+# Quick status check
+sudo ./unified-installer.sh --status
+```
+
 ## 🆕 **NEW: WHM Varnish Cache Manager Plugin**
 
 We've created a stunning WHM plugin that matches the preview interface you saw! Features include:
@@ -104,28 +130,30 @@ We've created a stunning WHM plugin that matches the preview interface you saw! 
 - Mobile-responsive layout
 
 ### 📊 **Advanced Analytics & Monitoring**
-- Live performance metrics with auto-refresh
-- Interactive charts showing hit rates, response times, bandwidth usage
-- Security status monitoring with threat detection
-- SSL certificate status tracking
-- System resource monitoring (CPU, memory, uptime)
+- Live performance metrics pulled directly from `varnishstat` and system counters
+- Interactive charts backed by persisted history (hourly/daily/weekly/monthly views)
+- Security status and backend health monitoring with real-time checks
+- SSL certificate status tracking for Hitch backends
+- System resource monitoring (CPU, memory, uptime) updated each refresh cycle
 
 ### 🛠️ **Comprehensive Management**
-- Domain-specific cache management with individual controls
-- Bulk cache purging with safety confirmations
+- Domain-specific cache management with real usage metrics sourced from WHM/cPanel and log sampling
+- Bulk cache purging with safety confirmations and contextual hit-rate summaries
 - VCL configuration editor with syntax validation
-- Backend health monitoring
-- Live log viewing with filtering options
+- Backend health monitoring and TLS routing insights
+- Live log viewing with filtering options and one-click log clearing
 
 ### ⚡ **Smart Features**
-- Auto-detection of server IP and domains
-- One-click cache purging with detailed warnings
-- Configuration validation before applying changes
-- Toast notifications for all operations
-- Context menus and keyboard shortcuts
+- Auto-detection of server IP, domains, document roots, and per-domain request rates
+- One-click cache purging with detailed warnings and purge summaries
+- Configuration validation before applying changes (settings saved to `/etc/varnish/cpanel-manager-settings.json`)
+- Toast notifications for all operations and persisted UI preferences
+- Context menus and keyboard shortcuts for rapid workflows
 
 # Please Note:
-The unified installer automatically reconfigures Apache to listen on `0.0.0.0:8080` (HTTP) and `0.0.0.0:8443` (HTTPS) so that Hitch can bind to port `443`. If another service such as nginx or a proxy is already listening on ports `80`, `8080`, or `443`, stop it before running the installer or the Hitch service will fail to start.
+The unified installer reconfigures Apache to listen on `0.0.0.0:8080` (HTTP) and `0.0.0.0:8443` (HTTPS). Varnish terminates HTTP on port `80`, while Hitch now proxies TLS traffic on `443` directly to Varnish's secure listener on `4443`. Stop any conflicting services on ports `80`, `8080`, `443`, or `4443` before running the installer or Hitch will fail to start.
+
+The WHM plugin is deployed under `/usr/local/cpanel/whostmgr/docroot/cgi/varnish`. Configuration history and chart data live at `/var/log/varnish/varnish-manager-history.json`, and UI preferences are stored in `/etc/varnish/cpanel-manager-settings.json`.
 
 Manual WHM tweaks are no longer required, but you can still verify the values under **WHM → Server Configuration → Tweak Settings** if you want to confirm the change.
 
@@ -298,7 +326,13 @@ sudo varnishd -C -f /etc/varnish/default.vcl
 ## 🗑️ Complete Uninstallation
 
 ### Automated Uninstall
-Re-run the unified installer and choose **Uninstall** from the menu; it restores Apache to port 80/443 and removes Varnish, Hitch, and the WHM plugin.
+For a completely non-interactive removal run:
+
+ ```bash
+ curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash -s -- --uninstall
+ ```
+
+Prefer the menu? Re-run the unified installer and choose **Uninstall** (option 7). Either path restores Apache to ports 80/443, disables and removes Varnish + Hitch, cleans `/usr/local/cpanel/whostmgr/docroot/cgi/varnish`, and deletes the Hitch certificate bundle.
 
 ### Manual Uninstall
 If you prefer to remove everything manually:
