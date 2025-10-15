@@ -395,9 +395,18 @@ sub vcl_deliver {
     }
 
     # Cache status headers
-    set resp.http.X-Cache-Status = obj.hits > 0 ? "HIT" : "MISS";
-    set resp.http.X-Cache-Age = obj.age;
-    set resp.http.X-Cache-TTL = obj.ttl;
+    if (obj.uncacheable) {
+        set resp.http.X-Cache-Status = "PASS";
+    } elseif (obj.hits > 0) {
+        set resp.http.X-Cache-Status = "HIT";
+    } else {
+        set resp.http.X-Cache-Status = "MISS";
+    }
+
+    if (!obj.uncacheable) {
+        set resp.http.X-Cache-Age = obj.age;
+        set resp.http.X-Cache-TTL = obj.ttl;
+    }
 
     # Security headers
     set resp.http.X-Frame-Options = "SAMEORIGIN";
@@ -412,7 +421,16 @@ sub vcl_deliver {
     }
 
     # Performance headers
-    set resp.http.Server-Timing = "cache;desc=" + (obj.hits > 0 ? "HIT" : "MISS") + ", age;dur=" + obj.age;
+    if (resp.http.X-Cache-Status == "HIT") {
+        set resp.http.Server-Timing = "cache;desc=HIT";
+    } elseif (resp.http.X-Cache-Status == "MISS") {
+        set resp.http.Server-Timing = "cache;desc=MISS";
+    } else {
+        set resp.http.Server-Timing = "cache;desc=PASS";
+    }
+    if (!obj.uncacheable) {
+        set resp.http.Server-Timing = resp.http.Server-Timing + ", age;dur=" + std.tostring(obj.age);
+    }
 
     # Cleanup internal headers
     unset resp.http.x-url;

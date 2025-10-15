@@ -744,8 +744,8 @@ group=System
 category=software
 feature=varnish_cache_manager
 acls=any
-url=varnish/whm_varnish_manager.cgi
-entryurl=varnish/whm_varnish_manager.cgi
+url=/cgi/varnish/whm_varnish_manager.cgi
+entryurl=/cgi/varnish/whm_varnish_manager.cgi
 target=_self
 icon=chart-area
 EOF
