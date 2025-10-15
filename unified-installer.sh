@@ -83,6 +83,88 @@ show_progress() {
     fi
 }
 
+declare -A BACKED_UP_FILES=()
+
+backup_file_once() {
+    local file="$1"
+    [ -f "$file" ] || return
+
+    if [ -z "${BACKED_UP_FILES[$file]+x}" ]; then
+        local timestamp
+        timestamp=$(date +%Y%m%d%H%M%S)
+        cp "$file" "${file}.backup.${timestamp}" 2>/dev/null || true
+        BACKED_UP_FILES[$file]=1
+    fi
+}
+
+find_conf_files_with_pattern() {
+    local pattern="$1"
+    shift
+    local -a preferred=("$@")
+    local -A seen=()
+    local file=""
+
+    for file in "${preferred[@]}"; do
+        if [ -f "$file" ] && grep -Eq "$pattern" "$file"; then
+            if [ -z "${seen[$file]+x}" ]; then
+                echo "$file"
+                seen[$file]=1
+            fi
+        fi
+    done
+
+    while IFS= read -r file; do
+        if [ -n "$file" ] && [ -z "${seen[$file]+x}" ]; then
+            echo "$file"
+            seen[$file]=1
+        fi
+    done < <(grep -RIl --include='*.conf' -E "$pattern" /etc/apache2 /etc/httpd 2>/dev/null || true)
+}
+
+update_port_in_file() {
+    local file="$1"
+    local from_port="$2"
+    local to_port="$3"
+
+    [ -f "$file" ] || return 1
+
+    if ! grep -Eq "(Listen|<VirtualHost|NameVirtualHost)[[:space:]][^#\n]*[: ]${from_port}([[:space:]>]|$)" "$file"; then
+        return 1
+    fi
+
+    backup_file_once "$file"
+
+    sed -i -E "s/(Listen\s+0\.0\.0\.0:)${from_port}\b/\1${to_port}/g" "$file"
+    sed -i -E "s/(Listen\s+[0-9]{1,3}(\.[0-9]{1,3}){3}:)${from_port}\b/\1${to_port}/g" "$file"
+    sed -i -E "s/(Listen\s+\*:?)${from_port}\b/\1${to_port}/g" "$file"
+    sed -i -E "s/(Listen\s+\[::\]:)${from_port}\b/\1${to_port}/g" "$file"
+    sed -i -E "s/^Listen\s+${from_port}\b/Listen 0.0.0.0:${to_port}/g" "$file"
+    sed -i -E "s/(<VirtualHost\s+[^:>]*:)${from_port}\b/\1${to_port}/g" "$file"
+    sed -i -E "s/(NameVirtualHost\s+[^:>]*:)${from_port}\b/\1${to_port}/g" "$file"
+
+    log "INFO" "${GREEN}✓ Updated Apache configuration (${file}) port ${from_port}→${to_port}${NC}"
+    return 0
+}
+
+check_port_conflict() {
+    local port="$1"
+    local label="$2"
+    local conflict_info=""
+
+    if command -v ss >/dev/null 2>&1; then
+        conflict_info=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p')
+    fi
+
+    if [ -z "$conflict_info" ] && command -v lsof >/dev/null 2>&1; then
+        conflict_info=$(lsof -nP -i :"$port" 2>/dev/null || true)
+    fi
+
+    if [ -n "$conflict_info" ]; then
+        log "WARN" "${YELLOW}⚠️ Port ${port} (${label}) is currently in use. Stop the conflicting service before continuing.${NC}"
+        echo "$conflict_info" >> "$LOG_FILE"
+    fi
+}
+
 detect_system() {
     log "INFO" "${BLUE}🔍 Detecting system configuration...${NC}"
     
@@ -240,39 +322,103 @@ install_varnish_and_hitch() {
 }
 
 configure_apache_ports() {
-    local apache_conf=""
+    log "INFO" "${BLUE}🛠️ Harmonizing Apache listener ports...${NC}"
+
+    check_port_conflict 80 "Apache HTTP"
+    check_port_conflict 443 "HTTPS"
 
     if [ "$HAS_CPANEL" = true ] && command -v whmapi1 >/dev/null 2>&1; then
-        log "INFO" "${CYAN}🔧 Configuring Apache ports via WHM API...${NC}"
+        log "INFO" "${CYAN}🔧 Applying WHM tweak settings for Apache ports...${NC}"
         whmapi1 set_tweaksetting key=apache_port value=0.0.0.0:8080 >/dev/null 2>&1 || \
-            log "WARN" "${YELLOW}⚠️ Unable to set Apache HTTP port via WHM API${NC}"
+            log "WARN" "${YELLOW}⚠️ Unable to update Apache non-SSL port via WHM API${NC}"
         whmapi1 set_tweaksetting key=apache_ssl_port value=0.0.0.0:8443 >/dev/null 2>&1 || \
-            log "WARN" "${YELLOW}⚠️ Unable to set Apache HTTPS port via WHM API${NC}"
+            log "WARN" "${YELLOW}⚠️ Unable to update Apache SSL port via WHM API${NC}"
+    fi
 
-        if command -v /scripts/rebuildhttpdconf >/dev/null 2>&1; then
-            /scripts/rebuildhttpdconf >/dev/null 2>&1 || \
-                log "WARN" "${YELLOW}⚠️ Failed to rebuild Apache configuration via WHM scripts${NC}"
-        fi
-    else
-        if [ -f /etc/httpd/conf/httpd.conf ]; then
-            apache_conf="/etc/httpd/conf/httpd.conf"
-        elif [ -f /etc/apache2/conf/httpd.conf ]; then
-            apache_conf="/etc/apache2/conf/httpd.conf"
-        fi
+    local http_pattern='(Listen|<VirtualHost|NameVirtualHost)[[:space:]][^#\n]*[: ]80([[:space:]>]|$)'
+    local ssl_pattern='(Listen|<VirtualHost|NameVirtualHost)[[:space:]][^#\n]*[: ]443([[:space:]>]|$)'
+    local -a http_candidates=(
+        "/etc/apache2/conf/httpd.conf"
+        "/etc/httpd/conf/httpd.conf"
+        "/etc/apache2/conf.d/port.conf"
+        "/etc/httpd/conf.d/port.conf"
+        "/etc/apache2/conf/extra/httpd-vhosts.conf"
+        "/etc/httpd/conf/extra/httpd-vhosts.conf"
+    )
+    local -a ssl_candidates=(
+        "/etc/apache2/conf.d/ssl.conf"
+        "/etc/httpd/conf.d/ssl.conf"
+        "/etc/apache2/conf/extra/httpd-ssl.conf"
+        "/etc/httpd/conf/extra/httpd-ssl.conf"
+        "/etc/apache2/conf/httpd.conf"
+        "/etc/httpd/conf/httpd.conf"
+    )
 
-        if [ -n "$apache_conf" ]; then
-            cp "$apache_conf" "${apache_conf}.backup.$(date +%Y%m%d)" 2>/dev/null || true
-            sed -i -E 's/^Listen\s+80(\b|$)/Listen 8080/' "$apache_conf"
-            sed -i -E 's/^Listen\s+443(\b|$)/Listen 8443/' "$apache_conf"
-            sed -i -E 's/<VirtualHost\s+\S*:443>/<VirtualHost *:8443>/g' "$apache_conf"
+    local -a http_conf_files=()
+    local -a ssl_conf_files=()
+    mapfile -t http_conf_files < <(find_conf_files_with_pattern "$http_pattern" "${http_candidates[@]}")
+    mapfile -t ssl_conf_files < <(find_conf_files_with_pattern "$ssl_pattern" "${ssl_candidates[@]}")
 
-            if ! grep -Eq '^Listen\s+8080' "$apache_conf"; then
-                echo "Listen 8080" >> "$apache_conf"
-            fi
-            if ! grep -Eq '^Listen\s+8443' "$apache_conf"; then
-                echo "Listen 8443" >> "$apache_conf"
-            fi
+    local updated_http=false
+    local updated_ssl=false
+    local conf=""
+
+    for conf in "${http_conf_files[@]}"; do
+        if update_port_in_file "$conf" 80 8080; then
+            updated_http=true
         fi
+    done
+
+    for conf in "${ssl_conf_files[@]}"; do
+        if update_port_in_file "$conf" 443 8443; then
+            updated_ssl=true
+        fi
+    done
+
+    if [ "$updated_http" = false ]; then
+        log "WARN" "${YELLOW}⚠️ Could not locate any Apache configuration entries for port 80. Verify Apache configuration manually.${NC}"
+    fi
+
+    if [ "$updated_ssl" = false ]; then
+        log "WARN" "${YELLOW}⚠️ Could not locate any Apache configuration entries for port 443. Hitch may still conflict with the existing listener.${NC}"
+    fi
+
+    if command -v /scripts/rebuildhttpdconf >/dev/null 2>&1; then
+        /scripts/rebuildhttpdconf >/dev/null 2>&1 || \
+            log "WARN" "${YELLOW}⚠️ Failed to rebuild Apache configuration via WHM scripts${NC}"
+    fi
+
+    check_port_conflict 8080 "Apache HTTP (post-change)"
+    check_port_conflict 8443 "Apache HTTPS (post-change)"
+}
+
+reset_apache_ports() {
+    log "INFO" "${BLUE}🧹 Restoring Apache ports to 80/443...${NC}"
+
+    if [ "$HAS_CPANEL" = true ] && command -v whmapi1 >/dev/null 2>&1; then
+        whmapi1 set_tweaksetting key=apache_port value=0.0.0.0:80 >/dev/null 2>&1 || true
+        whmapi1 set_tweaksetting key=apache_ssl_port value=0.0.0.0:443 >/dev/null 2>&1 || true
+    fi
+
+    local http_pattern='(Listen|<VirtualHost|NameVirtualHost)[[:space:]][^#\n]*[: ]8080([[:space:]>]|$)'
+    local ssl_pattern='(Listen|<VirtualHost|NameVirtualHost)[[:space:]][^#\n]*[: ]8443([[:space:]>]|$)'
+    local -a http_conf_files=()
+    local -a ssl_conf_files=()
+
+    mapfile -t http_conf_files < <(find_conf_files_with_pattern "$http_pattern" "/etc/apache2/conf/httpd.conf" "/etc/httpd/conf/httpd.conf" "/etc/apache2/conf.d/port.conf" "/etc/httpd/conf.d/port.conf" "/etc/apache2/conf/extra/httpd-vhosts.conf" "/etc/httpd/conf/extra/httpd-vhosts.conf")
+    mapfile -t ssl_conf_files < <(find_conf_files_with_pattern "$ssl_pattern" "/etc/apache2/conf.d/ssl.conf" "/etc/httpd/conf.d/ssl.conf" "/etc/apache2/conf/extra/httpd-ssl.conf" "/etc/httpd/conf/extra/httpd-ssl.conf" "/etc/apache2/conf/httpd.conf" "/etc/httpd/conf/httpd.conf")
+
+    local conf=""
+    for conf in "${http_conf_files[@]}"; do
+        update_port_in_file "$conf" 8080 80 || true
+    done
+
+    for conf in "${ssl_conf_files[@]}"; do
+        update_port_in_file "$conf" 8443 443 || true
+    done
+
+    if command -v /scripts/rebuildhttpdconf >/dev/null 2>&1; then
+        /scripts/rebuildhttpdconf >/dev/null 2>&1 || true
     fi
 }
 
@@ -406,9 +552,33 @@ EOF
     log "INFO" "${CYAN}ℹ️ Hitch configuration prepared. Service will restart after Apache reload.${NC}"
 }
 
+cleanup_existing_whm_plugin() {
+    local plugin_dir="/usr/local/cpanel/whm/docroot/cgi/varnish"
+    local theme=""
+    local dynamic_dir=""
+
+    if command -v /usr/local/cpanel/bin/unregister_appconfig >/dev/null 2>&1; then
+        /usr/local/cpanel/bin/unregister_appconfig varnish_cache_manager >/dev/null 2>&1 || true
+    fi
+
+    rm -rf "$plugin_dir" 2>/dev/null || true
+    rm -f /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || true
+    rm -f /var/cpanel/whm/addon_plugins/varnish.conf 2>/dev/null || true
+
+    for theme in jupiter glass paper_lantern; do
+        dynamic_dir="/usr/local/cpanel/base/frontend/${theme}/dynamicui"
+        if [ -d "$dynamic_dir" ]; then
+            rm -f "$dynamic_dir/varnish_cache_manager.json" 2>/dev/null || true
+        fi
+    done
+
+    log "INFO" "${CYAN}ℹ️ Removed legacy WHM plugin artefacts before deployment${NC}"
+}
+
 install_whm_plugin() {
     if [ "$HAS_CPANEL" = true ]; then
         log "INFO" "${BLUE}🎮 Installing WHM management plugin...${NC}"
+        cleanup_existing_whm_plugin
         
         # Create WHM plugin directory
         if ! mkdir -p /usr/local/cpanel/whm/docroot/cgi/varnish; then
@@ -428,6 +598,8 @@ install_whm_plugin() {
         fi
         
         chmod +x /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
+        chown root:root /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
+        sed -i 's/\r$//' /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
         
         # Register plugin using AppConfig for modern WHM themes
         local appconfig_tmp
@@ -441,15 +613,11 @@ group=System
 category=software
 feature=varnish_cache_manager
 acls=any
-url=/cgi/varnish/whm_varnish_manager.cgi
-entryurl=/cgi/varnish/whm_varnish_manager.cgi
+url=varnish/whm_varnish_manager.cgi
+entryurl=varnish/whm_varnish_manager.cgi
 target=_self
 icon=chart-area
 EOF
-
-        if command -v /usr/local/cpanel/bin/unregister_appconfig >/dev/null 2>&1; then
-            /usr/local/cpanel/bin/unregister_appconfig varnish_cache_manager >/dev/null 2>&1 || true
-        fi
 
         if [ -x /usr/local/cpanel/bin/register_appconfig ]; then
             if /usr/local/cpanel/bin/register_appconfig "$appconfig_tmp" >/dev/null 2>&1; then
@@ -482,7 +650,7 @@ EOF
         "name": "varnish_cache_manager",
         "type": "link",
         "data": {
-            "href": "/cgi/varnish/whm_varnish_manager.cgi",
+            "href": "varnish/whm_varnish_manager.cgi",
             "target": "self"
         },
         "metadata": {
@@ -508,6 +676,14 @@ icon: /whm/addon_plugins/park_wrapper_24.gif
 description: Manage Varnish Cache with real-time performance monitoring
 EOF
         chmod 644 /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || true
+
+        if command -v whmapi1 >/dev/null 2>&1; then
+            whmapi1 flush_third_party_dynamicui name=varnish_cache_manager >/dev/null 2>&1 || true
+        fi
+
+        if [ -x /usr/local/cpanel/bin/clearcache ]; then
+            /usr/local/cpanel/bin/clearcache whostmgr 2>/dev/null || true
+        fi
 
         if command -v /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1; then
             /usr/local/cpanel/bin/build_locale_databases >/dev/null 2>&1 || true
@@ -553,14 +729,18 @@ start_services() {
     fi
 }
 
+stop_services() {
+    log "INFO" "${BLUE}⛔ Stopping Varnish, Hitch, and Apache...${NC}"
+    systemctl stop hitch &>/dev/null || true
+    systemctl stop varnish &>/dev/null || true
+    systemctl stop httpd &>/dev/null || true
+}
+
 run_performance_optimization() {
     log "INFO" "${BLUE}⚡ Applying performance optimizations...${NC}"
     
-    if [ -f "optimize-performance.sh" ]; then
-        chmod +x optimize-performance.sh
-        ./optimize-performance.sh &>/dev/null
-        log "INFO" "${GREEN}✅ Performance optimizations applied${NC}"
-    fi
+    log "INFO" "${CYAN}ℹ️ Performance tuning is now handled directly by the unified installer.${NC}"
+    log "INFO" "${CYAN}ℹ️ Varnish runtime parameters and system limits are configured automatically.${NC}"
 }
 
 validate_installation() {
@@ -618,7 +798,7 @@ show_completion_summary() {
     log "INFO" "${WHITE}║     • Status: systemctl status varnish                                                       ║${NC}"
     log "INFO" "${WHITE}║     • Stats: varnishstat                                                                      ║${NC}"
     log "INFO" "${WHITE}║     • Logs: journalctl -u varnish -f                                                         ║${NC}"
-    log "INFO" "${WHITE}║     • Validate: $INSTALL_DIR/check-status.sh                        ║${NC}"
+    log "INFO" "${WHITE}║     • Validate: sudo httpd -t && sudo varnishd -C -f /etc/varnish/default.vcl ║${NC}"
     log "INFO" "${WHITE}║                                                                                               ║${NC}"
     log "INFO" "${WHITE}╚═══════════════════════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
@@ -710,19 +890,40 @@ optimization_only() {
 status_check() {
     log "INFO" "${PURPLE}📊 Running status check...${NC}"
     echo
-    
-    download_and_setup
-    chmod +x check-status.sh
-    ./check-status.sh
+
+    detect_system
+    if validate_installation; then
+        log "INFO" "${GREEN}✅ Environment looks healthy${NC}"
+    else
+        log "WARN" "${YELLOW}⚠️ Detected potential issues. Review the log output above for details.${NC}"
+    fi
 }
 
 uninstall_varnish() {
     log "INFO" "${PURPLE}🗑️ Starting uninstallation...${NC}"
     echo
-    
-    download_and_setup
-    chmod +x easy-uninstall.sh
-    ./easy-uninstall.sh
+
+    detect_system
+    stop_services
+    cleanup_existing_whm_plugin
+    systemctl disable varnish hitch &>/dev/null || true
+    systemctl enable httpd &>/dev/null || true
+    rm -rf /etc/systemd/system/varnish.service.d 2>/dev/null || true
+    rm -rf /etc/systemd/system/hitch.service.d 2>/dev/null || true
+    rm -rf /etc/hitch/certs 2>/dev/null || true
+    rm -f /etc/hitch/hitch.conf 2>/dev/null || true
+    systemctl daemon-reload
+
+    if command -v dnf >/dev/null 2>&1; then
+        dnf remove -y varnish hitch &>/dev/null || true
+    else
+        yum remove -y varnish hitch &>/dev/null || true
+    fi
+
+    reset_apache_ports
+    systemctl restart httpd &>/dev/null || true
+
+    log "INFO" "${GREEN}✅ Uninstallation completed. Apache is back on ports 80/443.${NC}"
 }
 
 main() {

@@ -84,23 +84,14 @@ Maximum performance optimizations:
 curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash -s -- --performance
 ```
 
-### **4. 🎮 Interactive Installation**
-Choose specific components:
+### **4. 🎮 Interactive Menu**
+Download the installer and run it locally for full menu control:
 ```bash
-curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/easy-install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh -o unified-installer.sh
+chmod +x unified-installer.sh
+sudo ./unified-installer.sh
 ```
-
-### **5. 🗑️ Easy Uninstallation**
-Complete removal with system restoration:
-```bash
-curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/easy-uninstall.sh | sudo bash
-```
-
-### **6. 📊 Status Check**
-Monitor installation and get recommendations:
-```bash
-curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/check-status.sh | sudo bash
-```
+The menu includes one-click options for plugin-only setup, cPanel integration, performance tuning, health checks, and clean uninstallation.
 
 ## 🆕 **NEW: WHM Varnish Cache Manager Plugin**
 
@@ -134,35 +125,9 @@ We've created a stunning WHM plugin that matches the preview interface you saw! 
 - Context menus and keyboard shortcuts
 
 # Please Note:
-Before you begin, Go to WHM and search for Tweak Settings, it can be found at Server Configuration > Tweak Settings.
-Search apache in the Find box, scroll down under System area and change the areas like below.
-For Apache non-SSL IP/port, change from default 0.0.0.0:80 default to 0.0.0.0:8080 using the text box below.
-For Apache SSL port, change from 0.0.0.0:443 default to 0.0.0.0:8443 using the text box below.
-Save changes and search HTTP Server (Apache) in the search box, and click on Restart.
-This would temporarily make user websites inaccessible until finished.
+The unified installer automatically reconfigures Apache to listen on `0.0.0.0:8080` (HTTP) and `0.0.0.0:8443` (HTTPS) so that Hitch can bind to port `443`. If another service such as nginx or a proxy is already listening on ports `80`, `8080`, or `443`, stop it before running the installer or the Hitch service will fail to start.
 
-##  Makefile Installation
-
-### Quick Commands:
-```bash
-git clone https://github.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x.git
-cd varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x
-
-# Full installation (includes WHM plugin)
-make install
-
-# Or configure existing Varnish for cPanel
-make install-cpanel
-
-# Or install just the WHM plugin
-make install-plugin
-
-# Validate configuration
-make validate
-
-# Uninstall everything
-make uninstall
-```
+Manual WHM tweaks are no longer required, but you can still verify the values under **WHM → Server Configuration → Tweak Settings** if you want to confirm the change.
 
 ## 📋 Installation Options
 
@@ -255,49 +220,34 @@ The installer automatically detects your server specifications and optimizes:
 
 ## 🛠️ **MANAGEMENT COMMANDS**
 
-After installation, use these commands for management:
+Common post-installation tasks:
 
 ```bash
-# Check overall system status
-make status
+# Check service health
+systemctl status varnish
+systemctl status hitch
+systemctl status httpd
 
-# Validate configuration
-make validate
+# Validate configurations
+sudo httpd -t
+sudo varnishd -C -f /etc/varnish/default.vcl
 
-# Apply performance optimizations
-./optimize-performance.sh
-
-# Monitor real-time performance
+# Monitor runtime metrics
 varnishstat
-
-# View live access logs
 varnishlog
 
-# Check cache statistics
-varnishstat -1
-
 # Purge entire cache
-varnishadm 'ban req.url ~ .'
+sudo varnishadm 'ban req.url ~ .'
 
-# Restart services
-systemctl restart varnish httpd
-
-# Uninstall everything
-make uninstall
+# Restart the stack
+sudo systemctl restart httpd varnish hitch
 ```
 
 ## 🔍 Validation and Maintenance
 
-```bash
-# Check if everything is working
-make validate
-
-# Setup automatic SSL certificate updates
-make setup-cron
-
-# Clean temporary files
-make clean
-```
+- Re-run `unified-installer.sh --menu` at any time to access health checks or reinstall the WHM plugin.
+- Use `sudo /opt/varnish-cpanel-installer/update_hitch_certs.sh` after replacing SSL certificates to refresh Hitch bundles.
+- Consider a cron job for certificate syncing: `0 2 * * * /opt/varnish-cpanel-installer/update_hitch_certs.sh >/dev/null 2>&1`.
 
 # Varnish Cache Flush cPanel Plugin
 You can go to https://github.com/turnuphosting/cPanel-plugin-to-flush-varnish-cache-for-user-websites and follow the steps there to install cPanel Plugin that'll allow your users to clear the Varnish cache for their domains directly from cPanel.
@@ -347,13 +297,11 @@ sudo varnishd -C -f /etc/varnish/default.vcl
 
 ## 🗑️ Complete Uninstallation
 
-### Easy Uninstall
-```bash
-make uninstall
-```
+### Automated Uninstall
+Re-run the unified installer and choose **Uninstall** from the menu; it restores Apache to port 80/443 and removes Varnish, Hitch, and the WHM plugin.
 
 ### Manual Uninstall
-If the automated uninstall fails:
+If you prefer to remove everything manually:
 ```bash
 # Stop services
 sudo systemctl stop varnish hitch
