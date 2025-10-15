@@ -146,18 +146,36 @@ update_port_in_file() {
     return 0
 }
 
+
+get_port_conflict_info() {
+    local port="$1"
+    local conflict_info=""
+
+    if command -v ss >/dev/null 2>&1; then
+        conflict_info=$(ss -tulpn 2>/dev/null | awk -v port="$port" 'NR > 1 {
+            addr=$5
+            gsub(/\[|\]/, "", addr)
+            n=split(addr, parts, ":")
+            candidate=parts[n]
+            if (candidate == port) {
+                print $0
+            }
+        }')
+    fi
+
+    if [ -z "$conflict_info" ] && command -v lsof >/dev/null 2>&1; then
+        conflict_info=$(lsof -nP -i :"$port" -sTCP:LISTEN 2>/dev/null || true)
+    fi
+
+    echo "$conflict_info"
+}
+
 check_port_conflict() {
     local port="$1"
     local label="$2"
     local conflict_info=""
 
-    if command -v ss >/dev/null 2>&1; then
-        conflict_info=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p')
-    fi
-
-    if [ -z "$conflict_info" ] && command -v lsof >/dev/null 2>&1; then
-        conflict_info=$(lsof -nP -i :"$port" 2>/dev/null || true)
-    fi
+    conflict_info=$(get_port_conflict_info "$port")
 
     if [ -n "$conflict_info" ]; then
         local conflict_summary
@@ -169,6 +187,103 @@ check_port_conflict() {
         fi
         echo "$conflict_info" >> "$LOG_FILE"
     fi
+}
+
+get_port_process_names() {
+    local port="$1"
+    local names=""
+
+    if command -v lsof >/dev/null 2>&1; then
+        names=$(lsof -nP -i TCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $1}' | sort -u)
+    fi
+
+    if [ -z "$names" ]; then
+        local info
+        info=$(get_port_conflict_info "$port")
+        if [ -n "$info" ]; then
+            names=$(echo "$info" | grep -oE '\("[^"]+"' | tr -d '()"' | awk '{print $1}' | sort -u)
+        fi
+    fi
+
+    echo "$names"
+}
+
+map_process_to_service() {
+    local process="$1"
+    case "$process" in
+        httpd|apache2) echo "httpd" ;;
+        nginx) echo "nginx" ;;
+        varnishd) echo "varnish" ;;
+        hitch) echo "hitch" ;;
+        haproxy) echo "haproxy" ;;
+        envoy) echo "envoy" ;;
+        caddy) echo "caddy" ;;
+        lighttpd) echo "lighttpd" ;;
+        crowdsec*) echo "crowdsec" ;;
+        traefik) echo "traefik" ;;
+        *) echo "" ;;
+    esac
+}
+
+ensure_port_free() {
+    local port="$1"
+    local label="$2"
+    local allow_httpd="${3:-false}"
+    local conflict_info
+
+    conflict_info=$(get_port_conflict_info "$port")
+
+    if [ -z "$conflict_info" ]; then
+        return 0
+    fi
+
+    local processes
+    processes=$(get_port_process_names "$port")
+    local attempted=()
+
+    for process in $processes; do
+        if [ -z "$process" ]; then
+            continue
+        fi
+
+        if [ "$allow_httpd" = "true" ] && { [ "$process" = "httpd" ] || [ "$process" = "apache2" ]; }; then
+            continue
+        fi
+
+        local service
+        service=$(map_process_to_service "$process")
+
+        if [ -n "$service" ]; then
+            if systemctl status "$service" >/dev/null 2>&1 || systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
+                log "WARN" "${YELLOW}⚠️ Attempting to stop conflicting service '$service' on port ${port}...${NC}"
+                systemctl stop "$service" >/dev/null 2>&1 || true
+                attempted+=("$service")
+                sleep 1
+            fi
+        fi
+    done
+
+    conflict_info=$(get_port_conflict_info "$port")
+    if [ -n "$conflict_info" ]; then
+        local remaining
+        remaining=$(get_port_process_names "$port")
+        if [ -z "$remaining" ]; then
+            remaining="$processes"
+        fi
+        if [ -z "$remaining" ]; then
+            remaining="unknown process"
+        fi
+
+        log "ERROR" "${RED}❌ Port ${port} (${label}) is still in use. Conflicting processes: ${remaining}. Please stop or reconfigure these services (e.g., 'systemctl stop <service>') and rerun the installer.${NC}"
+        echo "$conflict_info" >> "$LOG_FILE"
+        exit 1
+    fi
+
+    if [ ${#attempted[@]} -gt 0 ]; then
+        log "INFO" "${GREEN}✓ Freed port ${port} by stopping: ${attempted[*]}${NC}"
+    fi
+
+    return 0
 }
 
 detect_system() {
@@ -629,8 +744,8 @@ group=System
 category=software
 feature=varnish_cache_manager
 acls=any
-url=/cgi/varnish/whm_varnish_manager.cgi
-entryurl=/cgi/varnish/whm_varnish_manager.cgi
+url=varnish/whm_varnish_manager.cgi
+entryurl=varnish/whm_varnish_manager.cgi
 target=_self
 icon=chart-area
 EOF
@@ -666,7 +781,7 @@ EOF
         "name": "varnish_cache_manager",
         "type": "link",
         "data": {
-            "href": "cgi/varnish/whm_varnish_manager.cgi",
+            "href": "/cgi/varnish/whm_varnish_manager.cgi",
             "target": "self"
         },
         "metadata": {
@@ -722,6 +837,12 @@ start_services() {
     
     show_progress 8 8 "Starting services"
     
+    ensure_port_free 8080 "Apache HTTP (post-change)"
+    ensure_port_free 8443 "Apache HTTPS (post-change)"
+    ensure_port_free 80 "Varnish HTTP"
+    ensure_port_free 443 "Hitch TLS frontend"
+    ensure_port_free 4443 "Varnish TLS backend"
+
     # Start services in correct order
     systemctl enable httpd varnish hitch &>/dev/null
     restart_apache
@@ -750,6 +871,7 @@ stop_services() {
     systemctl stop hitch &>/dev/null || true
     systemctl stop varnish &>/dev/null || true
     systemctl stop httpd &>/dev/null || true
+    systemctl stop nginx &>/dev/null || true
 }
 
 restart_apache() {
@@ -844,6 +966,7 @@ full_installation() {
     detect_system
     install_dependencies
     download_and_setup
+    stop_services
     install_varnish_and_hitch
     configure_system
     configure_hitch_tls
@@ -865,6 +988,7 @@ performance_installation() {
     detect_system
     install_dependencies
     download_and_setup
+    stop_services
     install_varnish_and_hitch
     configure_system
     configure_hitch_tls
@@ -883,10 +1007,16 @@ cpanel_configuration() {
     
     detect_system
     download_and_setup
+    stop_services
     configure_system
     configure_hitch_tls
     install_whm_plugin
+    ensure_port_free 8080 "Apache HTTP (post-change)"
+    ensure_port_free 8443 "Apache HTTPS (post-change)"
     restart_apache
+    ensure_port_free 80 "Varnish HTTP"
+    ensure_port_free 443 "Hitch TLS frontend"
+    ensure_port_free 4443 "Varnish TLS backend"
     systemctl restart varnish &>/dev/null
     validate_installation
 }

@@ -157,6 +157,8 @@ The WHM plugin is deployed under `/usr/local/cpanel/whostmgr/docroot/cgi/varnish
 
 When WHM/cPanel is present, the installer restarts Apache through `/scripts/restartsrv_httpd` before Hitch is started to guarantee the correct initialization order.
 
+During installation the script will stop or prompt you to stop any services binding to ports `80`, `443`, `8080`, `8443`, or `4443` (for example nginx, crowdsec, or legacy Hitch instances) so Varnish, Apache, and Hitch can claim their required listeners without manual troubleshooting.
+
 Manual WHM tweaks are no longer required, but you can still verify the values under **WHM → Server Configuration → Tweak Settings** if you want to confirm the change.
 
 ## 📋 Installation Options
