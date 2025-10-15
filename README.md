@@ -24,6 +24,7 @@ curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installa
 - 📊 **Real-time performance monitoring**
 - ⚡ **Auto-scaling based on server resources**
 - 🧠 **Intelligent caching algorithms**
+- 🧹 **Automatic port conflict resolution** (stops nginx, crowdsec, Hitch, etc. before Varnish starts)
 
 ## 🏆 **PERFORMANCE COMPARISON**
 
@@ -63,6 +64,12 @@ curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installa
 ## 🎛️ **INSTALLATION OPTIONS**
 
 The installer provides multiple installation modes to suit different needs:
+
+### ✅ Pre-flight Checklist
+- Run as `root` (or via `sudo`) on AlmaLinux/RHEL/CentOS-stream 8/9 with WHM installed
+- Ensure ports `80`, `443`, `8080`, `8443`, and `4443` can be reassigned; the installer will stop common listeners (Apache, nginx, Hitch, crowdsec-agent) automatically, but plan downtime if these services are in production
+- Confirm outbound HTTPS is allowed so Varnish packages and certificates can be downloaded
+- Optional: snapshot your server or back up `/etc/httpd`, `/etc/varnish`, and `/etc/hitch` if you want an easy rollback
 
 ### **1. 🚀 Automatic Installation (Zero Prompts)**
 Perfect for automated deployments and scripts:
@@ -117,6 +124,9 @@ curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installa
 
 # Quick status check
 sudo ./unified-installer.sh --status
+
+# Reinstall only the WHM plugin (after pulling latest code)
+curl -sSL https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main/unified-installer.sh | sudo bash -s -- --plugin-only
 ```
 
 ## 🆕 **NEW: WHM Varnish Cache Manager Plugin**
@@ -190,6 +200,8 @@ After installation, access the world-class management interface:
 **🎯 Access Methods:**
 - **WHM Location**: System → Varnish Cache Manager  
 - **Direct URL**: `https://your-server:2087/cgi/varnish/whm_varnish_manager.cgi`
+
+The installer registers the plugin via WHM AppConfig automatically, so the interface is immediately available to root/resellers. If you ever see a 403 “unregistered application” message, pull the latest scripts and run `sudo ./unified-installer.sh --plugin-only` to refresh the registration.
 
 **🎛️ Plugin Features:**
 1. **📊 Overview Dashboard**: Real-time performance metrics with animated charts
