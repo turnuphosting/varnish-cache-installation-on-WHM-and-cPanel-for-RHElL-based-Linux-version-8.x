@@ -36,7 +36,11 @@ if [[ "$EUID" -ne 0 ]]; then
     fatal "Run this installer as root."
 fi
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [[ -n ${BASH_SOURCE+x} ]]; then
+    SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+else
+    SCRIPT_DIR="$PWD"
+fi
 APACHE_CONF="/etc/apache2/conf/httpd.conf"
 [[ -f "$APACHE_CONF" ]] || APACHE_CONF="/etc/httpd/conf/httpd.conf"
 [[ -f "$APACHE_CONF" ]] || fatal "Could not locate Apache httpd.conf. Install cPanel/WHM before running."
@@ -54,6 +58,8 @@ VARNISH_SERVICE_OVERRIDE="/etc/systemd/system/varnish.service.d/override.conf"
 HITCH_CONF="/etc/hitch/hitch.conf"
 WHM_PLUGIN_DIR="/usr/local/cpanel/whostmgr/docroot/cgi/varnish"
 APPCONFIG_FILE="/var/cpanel/apps/varnish-cache-manager.conf"
+ASSET_DIR="$INSTALL_BASE/assets"
+REPO_BASE_URL="https://raw.githubusercontent.com/turnuphosting/varnish-cache-installation-on-WHM-and-cPanel-for-RHElL-based-Linux-version-8.x/main"
 
 choose_cache_storage() {
     if (( MEM_TOTAL_MB < 2048 )); then
@@ -93,6 +99,37 @@ backup_config() {
         BACKUPS[$file]=1
         log INFO "Backed up $file -> ${file}.bak.${stamp}"
     fi
+}
+
+ensure_asset() {
+    local local_path="$1"
+    local remote_rel="$2"
+
+    if [[ -f "$local_path" ]]; then
+        echo "$local_path"
+        return 0
+    fi
+
+    if [[ -z "$remote_rel" ]]; then
+        fatal "Missing required asset at $local_path"
+    fi
+
+    mkdir -p "$(dirname "$local_path")"
+    log INFO "Downloading $remote_rel from repository"
+    curl -fsSL "$REPO_BASE_URL/$remote_rel" -o "$local_path" || \
+        fatal "Failed to download $remote_rel from $REPO_BASE_URL"
+    echo "$local_path"
+}
+
+get_asset_path() {
+    local relative_path="$1"
+    local local_candidate="$SCRIPT_DIR/$relative_path"
+    if [[ -f "$local_candidate" ]]; then
+        echo "$local_candidate"
+        return 0
+    fi
+
+    ensure_asset "$ASSET_DIR/$relative_path" "$relative_path"
 }
 
 ensure_package() {
@@ -222,10 +259,8 @@ EOF
 }
 
 install_vcl() {
-    local source_vcl="$SCRIPT_DIR/optimized-default.vcl"
-    if [[ ! -f "$source_vcl" ]]; then
-        fatal "Optimized VCL template not found at $source_vcl"
-    fi
+    local source_vcl
+    source_vcl=$(get_asset_path "optimized-default.vcl")
 
     log INFO "Installing optimized VCL to $VARNISH_DEFAULT_VCL"
     mkdir -p "$(dirname "$VARNISH_DEFAULT_VCL")"
@@ -282,12 +317,10 @@ EOF
 deploy_support_scripts() {
     log INFO "Deploying helper scripts to $INSTALL_BASE"
     mkdir -p "$INSTALL_BASE"
-    if [[ ! -f "$SCRIPT_DIR/update_hitch_certs.sh" ]]; then
-        log WARN "update_hitch_certs.sh not found; skipping helper deployment"
-        return
-    fi
+    local updater
+    updater=$(get_asset_path "update_hitch_certs.sh")
 
-    cp "$SCRIPT_DIR/update_hitch_certs.sh" "$INSTALL_BASE/update_hitch_certs.sh"
+    cp "$updater" "$INSTALL_BASE/update_hitch_certs.sh"
     chmod 0755 "$INSTALL_BASE/update_hitch_certs.sh"
 }
 
@@ -297,15 +330,15 @@ deploy_whm_plugin() {
         return
     fi
 
-    if [[ ! -f "$SCRIPT_DIR/whm_varnish_manager.cgi" || ! -f "$SCRIPT_DIR/varnish_ajax.cgi" ]]; then
-        log WARN "WHM plugin CGI files are missing; skipping plugin deployment"
-        return
-    fi
-
     log INFO "Deploying WHM Varnish Cache Manager plugin"
+    local manager_cgi
+    local ajax_cgi
+    manager_cgi=$(get_asset_path "whm_varnish_manager.cgi")
+    ajax_cgi=$(get_asset_path "varnish_ajax.cgi")
+
     mkdir -p "$WHM_PLUGIN_DIR"
-    cp "$SCRIPT_DIR/whm_varnish_manager.cgi" "$WHM_PLUGIN_DIR/whm_varnish_manager.cgi"
-    cp "$SCRIPT_DIR/varnish_ajax.cgi" "$WHM_PLUGIN_DIR/varnish_ajax.cgi"
+    cp "$manager_cgi" "$WHM_PLUGIN_DIR/whm_varnish_manager.cgi"
+    cp "$ajax_cgi" "$WHM_PLUGIN_DIR/varnish_ajax.cgi"
     chmod 0755 "$WHM_PLUGIN_DIR/whm_varnish_manager.cgi" "$WHM_PLUGIN_DIR/varnish_ajax.cgi"
 
     mkdir -p "$(dirname "$APPCONFIG_FILE")"
