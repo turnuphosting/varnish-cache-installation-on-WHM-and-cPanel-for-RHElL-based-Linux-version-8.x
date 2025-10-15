@@ -24,7 +24,7 @@ log() {
         ERROR) colour="$RED";;
         *) colour="$CYAN";;
     esac
-    echo -e "${colour}[$level]${NC} $*"
+    echo -e "${colour}[$level]${NC} $*" >&2
 }
 
 fatal() {
