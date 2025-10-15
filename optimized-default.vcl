@@ -17,10 +17,11 @@ vcl 4.1;
 import std;
 import directors;
 import cookie;
-import header;
-import proxy;
-import bodyaccess;
-import xkey;
+# Optional VMODs (uncomment if installed)
+# import header;
+# import proxy;
+# import bodyaccess;
+# import xkey;
 
 # Backend configuration with health checks and load balancing
 backend default {
@@ -97,7 +98,7 @@ sub vcl_recv {
         }
     }
 
-    # Enhanced purge logic with xkey support
+    # Enhanced purge logic (tag-based purge requires optional xkey VMOD)
     if (req.method == "PURGE") {
         if (!client.ip ~ purge) {
             return (synth(405, "PURGE not allowed"));
@@ -109,8 +110,7 @@ sub vcl_recv {
         }
         
         if (req.http.X-Purge-Key) {
-            set req.http.n-gone = xkey.purge(req.http.X-Purge-Key);
-            return (synth(200, "Purged " + req.http.n-gone + " objects"));
+            return (synth(501, "X-Purge-Key requires the xkey VMOD"));
         }
         
         ban("obj.http.x-url == " + req.url + " && obj.http.x-host == " + req.http.host);
@@ -155,7 +155,7 @@ sub vcl_recv {
     
     # Set protocol header for SSL detection
     if (!req.http.X-Forwarded-Proto) {
-        if (proxy.is_ssl()) {
+        if (server.port == 4443) {
             set req.http.X-Forwarded-Proto = "https";
         } else {
             set req.http.X-Forwarded-Proto = "http";

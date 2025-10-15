@@ -454,6 +454,8 @@ configure_apache_ports() {
             log "WARN" "${YELLOW}⚠️ Unable to update Apache non-SSL port via WHM API${NC}"
         whmapi1 set_tweaksetting key=apache_ssl_port value=0.0.0.0:8443 >/dev/null 2>&1 || \
             log "WARN" "${YELLOW}⚠️ Unable to update Apache SSL port via WHM API${NC}"
+        whmapi1 set_tweaksetting key=allow_appconfig_as_root value=1 >/dev/null 2>&1 || \
+            log "WARN" "${YELLOW}⚠️ Unable to ensure AppConfig access for root sessions${NC}"
     fi
 
     local http_pattern='(Listen|<VirtualHost|NameVirtualHost)[[:space:]][^#\n]*[: ]80([[:space:]>]|$)'
@@ -641,6 +643,26 @@ configure_hitch_tls() {
         fi
     fi
 
+    if [ ${#pem_entries[@]} -eq 0 ] && command -v openssl >/dev/null 2>&1; then
+        local placeholder_prefix="$cert_dir/selfsigned"
+        local hostname
+        hostname=$(hostname -f 2>/dev/null || hostname || echo "localhost")
+
+        if openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout "${placeholder_prefix}.key" \
+            -out "${placeholder_prefix}.crt" \
+            -days 825 \
+            -subj "/CN=${hostname}" >/dev/null 2>&1; then
+            cat "${placeholder_prefix}.crt" "${placeholder_prefix}.key" > "${placeholder_prefix}.pem" 2>/dev/null || true
+            chmod 600 "${placeholder_prefix}.pem" "${placeholder_prefix}.key" 2>/dev/null || true
+            chown hitch:hitch "${placeholder_prefix}.pem" "${placeholder_prefix}.key" 2>/dev/null || true
+            pem_entries+=("${placeholder_prefix}.pem")
+            log "WARN" "${YELLOW}⚠️ No SSL certificates detected. Generated temporary self-signed certificate for Hitch (${hostname}). Replace it with a trusted certificate soon.${NC}"
+        else
+            log "WARN" "${YELLOW}⚠️ No SSL certificates detected and failed to create a self-signed fallback. Hitch will remain inactive until a certificate is installed.${NC}"
+        fi
+    fi
+
     cat > "$hitch_conf" <<EOF
 frontend = "[*]:443"
 backend = "[127.0.0.1]:4443"
@@ -744,8 +766,8 @@ group=System
 category=software
 feature=varnish_cache_manager
 acls=any
-url=/cgi/varnish/whm_varnish_manager.cgi
-entryurl=/cgi/varnish/whm_varnish_manager.cgi
+url=varnish/whm_varnish_manager.cgi
+entryurl=varnish/whm_varnish_manager.cgi
 target=_self
 icon=chart-area
 EOF
@@ -765,7 +787,7 @@ EOF
         cat > /var/cpanel/whm/addon_plugins/varnish.conf <<'EOF'
 name: Varnish Cache Manager
 version: 2.0
-url: /cgi/varnish/whm_varnish_manager.cgi
+url: varnish/whm_varnish_manager.cgi
 category: software
 desc: Manage Varnish Cache with real-time performance monitoring
 EOF
@@ -781,7 +803,7 @@ EOF
         "name": "varnish_cache_manager",
         "type": "link",
         "data": {
-            "href": "/cgi/varnish/whm_varnish_manager.cgi",
+            "href": "varnish/whm_varnish_manager.cgi",
             "target": "self"
         },
         "metadata": {
@@ -802,7 +824,7 @@ EOF
 ---
 group: System
 name: Varnish Cache Manager
-url: /cgi/varnish/whm_varnish_manager.cgi
+url: varnish/whm_varnish_manager.cgi
 icon: /whm/addon_plugins/park_wrapper_24.gif
 description: Manage Varnish Cache with real-time performance monitoring
 EOF
