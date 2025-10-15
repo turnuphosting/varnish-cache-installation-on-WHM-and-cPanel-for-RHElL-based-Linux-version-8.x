@@ -27,6 +27,7 @@ print <<'EOF';
 <head>
     <title>WHM Varnish Cache Manager - Real-time Monitor</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
             --primary-color: #2271b1;
@@ -1020,63 +1021,99 @@ print <<'EOF';
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
-        // Global variables
+        const API_BASE = '/cgi/varnish/varnish_ajax.cgi';
         let currentSection = 'overview';
         let currentTimeframe = 'hourly';
-        let charts = {};
+        const charts = {};
         let refreshInterval;
+        let currentLogLevel = 'all';
+        let lastMetrics = null;
+        let domainSnapshot = [];
 
-        // Initialize the dashboard
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', () => {
             initializeDashboard();
             startAutoRefresh();
             updateTime();
+            loadChartData();
         });
 
         function initializeDashboard() {
+            loadMetrics();
             loadDomains();
             initializeCharts();
-            loadMetrics();
         }
 
         function startAutoRefresh() {
-            // Update metrics every 30 seconds
+            stopAutoRefresh();
             refreshInterval = setInterval(() => {
                 loadMetrics();
+                loadDomains();
+                loadChartData();
                 updateTime();
             }, 30000);
         }
 
+        function stopAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+        }
+
         function updateTime() {
             const now = new Date();
-            document.querySelector('.update-time').textContent = 
-                now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const timeEl = document.querySelector('.update-time');
+            if (timeEl) {
+                timeEl.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+        }
+
+        function apiUrl(action, params = {}) {
+            const search = new URLSearchParams({ action });
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') {
+                    search.set(key, value);
+                }
+            });
+            return `${API_BASE}?${search.toString()}`;
+        }
+
+        async function callApi(action, { method = 'GET', params = {}, body = null } = {}) {
+            const options = { method, headers: {} };
+            if (body) {
+                options.headers['Content-Type'] = 'application/json';
+                options.body = JSON.stringify(body);
+            }
+            const response = await fetch(apiUrl(action, params), options);
+            if (!response.ok) {
+                throw new Error(`Request failed (${response.status})`);
+            }
+            return await response.json();
         }
 
         function showSection(section) {
-            // Update tabs
-            document.querySelectorAll('.section-tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            document.querySelector(`[onclick="showSection('${section}')"]`).classList.add('active');
+            document.querySelectorAll('.section-tab').forEach(tab => tab.classList.remove('active'));
+            const tab = document.querySelector(`[onclick="showSection('${section}')"]`);
+            if (tab) {
+                tab.classList.add('active');
+            }
 
-            // Update sections
-            document.querySelectorAll('.section').forEach(sec => {
-                sec.classList.remove('active');
-            });
-            document.getElementById(`${section}-section`).classList.add('active');
+            document.querySelectorAll('.section').forEach(sec => sec.classList.remove('active'));
+            const activeSection = document.getElementById(`${section}-section`);
+            if (activeSection) {
+                activeSection.classList.add('active');
+            }
 
             currentSection = section;
 
-            // Load section-specific content
-            switch(section) {
+            switch (section) {
                 case 'domains':
                     loadDomains();
                     break;
                 case 'analytics':
                     initializeCharts();
+                    loadChartData();
                     break;
                 case 'settings':
                     loadSettings();
@@ -1084,106 +1121,162 @@ print <<'EOF';
                 case 'logs':
                     loadLogs();
                     break;
+                default:
+                    break;
             }
         }
 
         async function loadMetrics() {
             try {
-                const response = await fetch('/cgi/varnish_ajax.cgi?action=getMetrics');
-                const data = await response.json();
-                
-                if (data.success) {
-                    updateMetrics(data.data);
+                const response = await callApi('getMetrics');
+                if (response.success && response.data) {
+                    lastMetrics = response.data;
+                    updateMetrics(response.data);
+                    updatePurgeSummary();
                 }
             } catch (error) {
                 console.error('Error loading metrics:', error);
             }
         }
 
-        function updateMetrics(data) {
-            // Update performance metrics
-            document.getElementById('overall-score').textContent = data.overall_score || '98';
-            document.getElementById('hit-rate').textContent = data.hit_rate || '94%';
-            document.getElementById('cache-size').textContent = data.cache_size || '24.5GB';
-            document.getElementById('request-rate').textContent = data.request_rate || '5.2K';
-            
-            // Update system metrics
-            document.getElementById('ssl-status').textContent = data.ssl_status || '12/12 All Valid';
-            document.getElementById('cpu-usage').textContent = data.cpu_usage || '32% - 8 Cores';
-            document.getElementById('memory-usage').textContent = data.memory_usage || '2.8GB of 4GB';
-            document.getElementById('requests-per-second').textContent = data.requests_per_second || '1.2K - Peak: 2.5K';
+        function updateMetrics(metrics) {
+            const overallEl = document.getElementById('overall-score');
+            if (overallEl && metrics.overall_score !== undefined && metrics.overall_score !== null) {
+                overallEl.textContent = metrics.overall_score;
+            }
+
+            const hitRateEl = document.getElementById('hit-rate');
+            if (hitRateEl) {
+                hitRateEl.textContent = formatPercentage(metrics.hit_rate);
+            }
+
+            const cacheSizeEl = document.getElementById('cache-size');
+            if (cacheSizeEl) {
+                cacheSizeEl.textContent = formatBytes(metrics.cache_size_bytes);
+            }
+
+            const requestRateEl = document.getElementById('request-rate');
+            if (requestRateEl) {
+                requestRateEl.textContent = `${formatNumber(metrics.request_rate_per_minute)}/min`;
+            }
+
+            const sslStatusEl = document.getElementById('ssl-status');
+            if (sslStatusEl) {
+                sslStatusEl.textContent = metrics.ssl_status || 'Unavailable';
+            }
+
+            const cpuEl = document.getElementById('cpu-usage');
+            if (cpuEl) {
+                if (metrics.cpu_usage_percent !== undefined && metrics.cpu_usage_percent !== null && metrics.cpu_cores) {
+                    cpuEl.textContent = `${metrics.cpu_usage_percent.toFixed(1)}% - ${metrics.cpu_cores} Cores`;
+                } else {
+                    cpuEl.textContent = 'Unavailable';
+                }
+            }
+
+            const memoryEl = document.getElementById('memory-usage');
+            if (memoryEl) {
+                if (metrics.memory_used_bytes !== undefined && metrics.memory_total_bytes) {
+                    memoryEl.textContent = `${formatBytes(metrics.memory_used_bytes)} of ${formatBytes(metrics.memory_total_bytes)}`;
+                } else {
+                    memoryEl.textContent = 'Unavailable';
+                }
+            }
+
+            const rpsEl = document.getElementById('requests-per-second');
+            if (rpsEl) {
+                const current = formatNumber(metrics.requests_per_second);
+                const peak = formatNumber(metrics.peak_requests_per_second);
+                rpsEl.textContent = `${current}/sec (peak ${peak}/sec)`;
+            }
         }
 
         async function loadDomains() {
             try {
-                const response = await fetch('/cgi/varnish_ajax.cgi?action=getDomains');
-                const data = await response.json();
-                
-                if (data.success) {
-                    displayDomains(data.data);
+                const response = await callApi('getDomains');
+                if (response.success) {
+                    domainSnapshot = response.data || [];
+                    displayDomains(domainSnapshot);
+                    updatePurgeSummary();
+                } else {
+                    displayDomains([]);
                 }
             } catch (error) {
                 console.error('Error loading domains:', error);
-                displaySampleDomains();
+                displayDomains([]);
             }
         }
 
         function displayDomains(domains) {
-            const domainsGrid = document.getElementById('domains-grid');
-            
-            if (!domains || domains.length === 0) {
-                displaySampleDomains();
+            const grid = document.getElementById('domains-grid');
+            const showingEl = document.getElementById('domains-showing');
+            const totalEl = document.getElementById('domains-total');
+            if (!grid) {
                 return;
             }
 
-            domainsGrid.innerHTML = '';
-            
-            const rows = Math.ceil(domains.length / 3);
+            grid.innerHTML = '';
+
+            if (!domains || domains.length === 0) {
+                grid.innerHTML = '<div class="card"><p>No domains detected yet. Traffic will appear here once Varnish begins serving requests.</p></div>';
+                if (showingEl) showingEl.textContent = '0';
+                if (totalEl) totalEl.textContent = '0';
+                return;
+            }
+
+            const visibleDomains = domains.slice(0, 9);
+            const rows = Math.ceil(visibleDomains.length / 3);
+
             for (let i = 0; i < rows; i++) {
                 const row = document.createElement('div');
                 row.className = 'domain-row';
-                
+
                 for (let j = 0; j < 3; j++) {
                     const index = i * 3 + j;
-                    if (index < domains.length) {
-                        const domain = domains[index];
-                        row.appendChild(createDomainCard(domain));
+                    if (index < visibleDomains.length) {
+                        row.appendChild(createDomainCard(visibleDomains[index]));
                     }
                 }
-                
-                domainsGrid.appendChild(row);
+
+                grid.appendChild(row);
             }
 
-            // Update pagination info
-            document.getElementById('domains-showing').textContent = `1-${Math.min(9, domains.length)}`;
-            document.getElementById('domains-total').textContent = domains.length;
-        }
-
-        function displaySampleDomains() {
-            const sampleDomains = [
-                { name: 'example.com', hit_rate: 98, requests: '2.4K/min', size: '8.2GB', status: 'active' },
-                { name: 'test.com', hit_rate: 95, requests: '1.8K/min', size: '5.1GB', status: 'active' },
-                { name: 'shop.example.com', hit_rate: 92, requests: '3.1K/min', size: '12.4GB', status: 'active' },
-                { name: 'blog.example.com', hit_rate: 89, requests: '1.2K/min', size: '3.8GB', status: 'active' },
-                { name: 'api.example.com', hit_rate: 85, requests: '5.6K/min', size: '2.1GB', status: 'warning' },
-                { name: 'cdn.example.com', hit_rate: 99, requests: '8.9K/min', size: '18.7GB', status: 'active' },
-                { name: 'staging.example.com', hit_rate: 76, requests: '0.3K/min', size: '1.2GB', status: 'inactive' },
-                { name: 'dev.example.com', hit_rate: 68, requests: '0.1K/min', size: '0.8GB', status: 'inactive' },
-                { name: 'mobile.example.com', hit_rate: 94, requests: '4.2K/min', size: '6.3GB', status: 'active' }
-            ];
-            
-            displayDomains(sampleDomains);
+            if (showingEl) {
+                showingEl.textContent = `1-${visibleDomains.length}`;
+            }
+            if (totalEl) {
+                totalEl.textContent = domains.length;
+            }
         }
 
         function createDomainCard(domain) {
             const card = document.createElement('div');
             card.className = 'domain-card';
-            
-            const statusClass = domain.status === 'active' ? 'active' : 
-                               domain.status === 'warning' ? 'warning' : 'inactive';
-            const statusText = domain.status === 'active' ? 'Active' : 
-                              domain.status === 'warning' ? 'Monitoring' : 'Inactive';
-            
+
+            const statusClass = domain.status === 'active'
+                ? 'active'
+                : domain.status === 'warning'
+                    ? 'warning'
+                    : 'inactive';
+            const statusLabel = domain.status === 'active'
+                ? 'Active'
+                : domain.status === 'warning'
+                    ? 'Monitoring'
+                    : 'Inactive';
+
+            const hitRateText = domain.hit_rate !== undefined && domain.hit_rate !== null
+                ? `${domain.hit_rate.toFixed(1)}%`
+                : 'N/A';
+
+            const requestText = `${formatNumber(domain.requests_per_minute || 0)}/min`;
+            const sizeSource = domain.cache_size_bytes !== undefined
+                ? domain.cache_size_bytes
+                : domain.docroot_size_bytes;
+            const statLabel = sizeSource !== undefined ? 'Cache Size' : 'Bandwidth';
+            const statValue = sizeSource !== undefined
+                ? formatBytes(sizeSource)
+                : formatBandwidth(domain.bandwidth_bytes_per_sec);
+
             card.innerHTML = `
                 <div class="domain-header">
                     <div class="domain-icon">
@@ -1191,113 +1284,254 @@ print <<'EOF';
                     </div>
                     <div class="domain-info">
                         <h4>${domain.name}</h4>
-                        <span class="domain-metrics">Hit Rate: ${domain.hit_rate}%</span>
+                        <span class="domain-metrics">Hit Rate: ${hitRateText}</span>
                     </div>
                 </div>
                 <div class="domain-stats">
                     <div class="stat-item">
                         <span class="stat-label">Requests</span>
-                        <span class="stat-value">${domain.requests}</span>
+                        <span class="stat-value">${requestText}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Size</span>
-                        <span class="stat-value">${domain.size}</span>
+                        <span class="stat-label">${statLabel}</span>
+                        <span class="stat-value">${statValue}</span>
                     </div>
                 </div>
                 <div class="domain-actions">
-                    <span class="status-badge ${statusClass}">${statusText}</span>
+                    <span class="status-badge ${statusClass}">${statusLabel}</span>
                     <button class="btn-icon" onclick="showDomainSettings('${domain.name}')">
                         <i class="fas fa-cog"></i>
                     </button>
                 </div>
             `;
-            
+
             return card;
         }
 
+        function updatePurgeSummary() {
+            if (!lastMetrics) {
+                return;
+            }
+            const domainCountEl = document.getElementById('purge-domain-count');
+            if (domainCountEl) {
+                domainCountEl.textContent = domainSnapshot.length;
+            }
+            const cacheSizeEl = document.getElementById('purge-cache-size');
+            if (cacheSizeEl) {
+                cacheSizeEl.textContent = formatBytes(lastMetrics.cache_size_bytes);
+            }
+        }
+
         function initializeCharts() {
-            const chartIds = ['hitRateChart', 'responseTimeChart', 'bandwidthChart', 'requestDistChart'];
-            
-            chartIds.forEach(chartId => {
-                const element = document.getElementById(chartId);
-                if (element && !charts[chartId]) {
-                    // Create a placeholder chart
-                    element.innerHTML = `
-                        <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #666;">
-                            <div style="text-align: center;">
-                                <i class="fas fa-chart-line" style="font-size: 48px; margin-bottom: 10px; opacity: 0.3;"></i>
-                                <div>Chart data loading...</div>
-                            </div>
-                        </div>
-                    `;
+            createLineChart('hitRateChart', 'Hit Rate (%)', 'rgba(34,113,177,0.7)');
+            createLineChart('responseTimeChart', 'Response Time (ms)', 'rgba(0,163,42,0.7)');
+            createLineChart('bandwidthChart', 'Bandwidth (MB/s)', 'rgba(240,184,73,0.7)');
+            createDoughnutChart('requestDistChart');
+        }
+
+        function createLineChart(elementId, label, color) {
+            if (charts[elementId]) {
+                return;
+            }
+
+            const container = document.getElementById(elementId);
+            if (!container) {
+                return;
+            }
+
+            const canvas = document.createElement('canvas');
+            container.innerHTML = '';
+            container.appendChild(canvas);
+
+            charts[elementId] = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label,
+                        data: [],
+                        borderColor: color,
+                        backgroundColor: color.replace('0.7', '0.15'),
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            ticks: { autoSkip: true, maxTicksLimit: 6 }
+                        },
+                        y: {
+                            beginAtZero: true
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        }
+                    }
+                }
+            });
+        }
+
+        function createDoughnutChart(elementId) {
+            if (charts[elementId]) {
+                return;
+            }
+
+            const container = document.getElementById(elementId);
+            if (!container) {
+                return;
+            }
+
+            const canvas = document.createElement('canvas');
+            container.innerHTML = '';
+            container.appendChild(canvas);
+
+            charts[elementId] = new Chart(canvas.getContext('2d'), {
+                type: 'doughnut',
+                data: {
+                    labels: ['Cache Hits', 'Cache Misses'],
+                    datasets: [{
+                        data: [0, 0],
+                        backgroundColor: [
+                            'rgba(34,113,177,0.7)',
+                            'rgba(204,24,24,0.7)'
+                        ],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom' }
+                    }
                 }
             });
         }
 
         function changeTimeframe(timeframe) {
-            // Update button states
-            document.querySelectorAll('.time-selector .btn').forEach(btn => {
-                btn.classList.remove('active');
-            });
-            document.querySelector(`[onclick="changeTimeframe('${timeframe}')"]`).classList.add('active');
-            
+            document.querySelectorAll('.time-selector .btn').forEach(btn => btn.classList.remove('active'));
+            const btn = document.querySelector(`[onclick="changeTimeframe('${timeframe}')"]`);
+            if (btn) {
+                btn.classList.add('active');
+            }
             currentTimeframe = timeframe;
-            
-            // Reload chart data for new timeframe
             loadChartData();
         }
 
         async function loadChartData() {
             try {
-                const response = await fetch(`/cgi/varnish_ajax.cgi?action=getChartData&timeframe=${currentTimeframe}`);
-                const data = await response.json();
-                
-                if (data.success) {
-                    updateCharts(data.data);
+                const response = await callApi('getChartData', { params: { timeframe: currentTimeframe } });
+                if (response.success) {
+                    updateCharts(response.data || []);
                 }
             } catch (error) {
                 console.error('Error loading chart data:', error);
             }
         }
 
-        function updateCharts(data) {
-            // Update chart displays with real data
-            console.log('Updating charts with data:', data);
+        function updateCharts(points) {
+            if (!Array.isArray(points) || points.length === 0) {
+                return;
+            }
+
+            const labels = points.map(point => new Date(point.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+
+            if (charts.hitRateChart) {
+                charts.hitRateChart.data.labels = labels;
+                charts.hitRateChart.data.datasets[0].data = points.map(point => point.hit_rate ?? 0);
+                charts.hitRateChart.update('none');
+            }
+
+            if (charts.responseTimeChart) {
+                charts.responseTimeChart.data.labels = labels;
+                charts.responseTimeChart.data.datasets[0].data = points.map(point => point.response_time_ms ?? 0);
+                charts.responseTimeChart.update('none');
+            }
+
+            if (charts.bandwidthChart) {
+                charts.bandwidthChart.data.labels = labels;
+                charts.bandwidthChart.data.datasets[0].data = points.map(point => (point.bandwidth_bytes_per_sec || 0) / 1048576);
+                charts.bandwidthChart.update('none');
+            }
+
+            const lastPoint = points[points.length - 1];
+            if (charts.requestDistChart && lastPoint && lastPoint.hit_rate !== undefined && lastPoint.hit_rate !== null) {
+                const hits = Math.max(0, Math.min(100, lastPoint.hit_rate));
+                const misses = Math.max(0, 100 - hits);
+                charts.requestDistChart.data.datasets[0].data = [hits, misses];
+                charts.requestDistChart.update('none');
+            }
         }
 
-        function loadSettings() {
-            const settingsContent = document.getElementById('settings-content');
-            settingsContent.innerHTML = `
+        async function loadSettings() {
+            const container = document.getElementById('settings-content');
+            if (!container) {
+                return;
+            }
+
+            container.innerHTML = '<div class="card"><p>Loading configuration...</p></div>';
+
+            try {
+                const response = await callApi('getSystemInfo');
+                const info = response.success ? (response.data || {}) : {};
+                renderSettings(container, info);
+            } catch (error) {
+                console.error('Error loading settings:', error);
+                container.innerHTML = '<div class="card"><p>Unable to load configuration details.</p></div>';
+            }
+        }
+
+        function renderSettings(container, info) {
+            const backendHost = info.backend_host || '127.0.0.1';
+            const backendPort = info.backend_port || 8080;
+            const healthCheck = info.health_check_enabled ? 'enabled' : 'disabled';
+            const vclPath = info.vcl_path || '/etc/varnish/default.vcl';
+            const hitchBackend = info.hitch_backend || '127.0.0.1:4443';
+
+            container.innerHTML = `
                 <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
-                    <div style="background: var(--bg-gradient); padding: 20px; border-radius: 10px;">
+                    <div class="card" style="background: var(--bg-gradient);">
                         <h3>Backend Configuration</h3>
                         <div style="display: grid; gap: 15px;">
                             <div>
-                                <label>Backend Host</label>
-                                <input type="text" value="127.0.0.1" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                <label for="backend-host">Backend Host</label>
+                                <input id="backend-host" type="text" value="${backendHost}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                             </div>
                             <div>
-                                <label>Backend Port</label>
-                                <input type="number" value="8080" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                <label for="backend-port">Backend Port</label>
+                                <input id="backend-port" type="number" value="${backendPort}" min="1" max="65535" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                             </div>
                             <div>
-                                <label>Health Check</label>
-                                <select style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                                    <option>Enabled</option>
-                                    <option>Disabled</option>
+                                <label for="backend-health-check">Health Check</label>
+                                <select id="backend-health-check" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                    <option value="enabled"${healthCheck === 'enabled' ? ' selected' : ''}>Enabled</option>
+                                    <option value="disabled"${healthCheck === 'disabled' ? ' selected' : ''}>Disabled</option>
                                 </select>
+                            </div>
+                            <div>
+                                <label>Hitch ➜ Varnish</label>
+                                <div style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">${hitchBackend}</div>
                             </div>
                         </div>
                     </div>
-                    <div style="background: var(--bg-gradient); padding: 20px; border-radius: 10px;">
+                    <div class="card" style="background: var(--bg-gradient);">
                         <h3>VCL Configuration</h3>
                         <div style="display: grid; gap: 15px;">
                             <div>
-                                <label>VCL File</label>
-                                <input type="text" value="/etc/varnish/default.vcl" readonly style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
+                                <label>Active VCL</label>
+                                <input type="text" value="${vclPath}" readonly style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
                             </div>
                             <button class="btn" onclick="editVCL()">
-                                <i class="fas fa-edit"></i> Edit VCL
+                                <i class="fas fa-edit"></i> View VCL
                             </button>
                             <button class="btn" onclick="reloadVCL()">
                                 <i class="fas fa-sync"></i> Reload VCL
@@ -1313,8 +1547,46 @@ print <<'EOF';
             `;
         }
 
+        async function saveSettings() {
+            try {
+                const payload = {
+                    backend_host: document.getElementById('backend-host')?.value.trim() || '127.0.0.1',
+                    backend_port: parseInt(document.getElementById('backend-port')?.value, 10) || 8080,
+                    health_check: document.getElementById('backend-health-check')?.value === 'enabled'
+                };
+                const response = await callApi('saveSettings', { method: 'POST', body: payload });
+                if (response.success) {
+                    showToast('success', response.message || 'Settings saved successfully');
+                } else {
+                    showToast('error', response.message || 'Unable to save settings');
+                }
+            } catch (error) {
+                console.error('Error saving settings:', error);
+                showToast('error', 'Unable to save settings');
+            }
+        }
+
+        async function reloadVCL() {
+            try {
+                showToast('info', 'Reloading VCL configuration...');
+                const response = await callApi('reloadVCL', { method: 'POST' });
+                if (response.success) {
+                    showToast('success', response.message || 'VCL reloaded successfully');
+                } else {
+                    showToast('error', response.message || 'Failed to reload VCL');
+                }
+            } catch (error) {
+                console.error('Error reloading VCL:', error);
+                showToast('error', 'Unable to reload VCL');
+            }
+        }
+
         function loadLogs() {
             const logsContent = document.getElementById('logs-content');
+            if (!logsContent) {
+                return;
+            }
+
             logsContent.innerHTML = `
                 <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
@@ -1340,36 +1612,65 @@ print <<'EOF';
                     <div>Loading logs...</div>
                 </div>
             `;
-            
-            // Load actual logs
+
             loadActualLogs();
         }
 
         async function loadActualLogs() {
+            const logDisplay = document.getElementById('log-display');
+            if (!logDisplay) {
+                return;
+            }
+
             try {
-                const response = await fetch('/cgi/varnish_ajax.cgi?action=getLogs');
-                const data = await response.json();
-                
-                const logDisplay = document.getElementById('log-display');
-                if (data.success && data.data) {
-                    logDisplay.innerHTML = data.data.replace(/\\n/g, '<br>');
+                const response = await callApi('getLogs', { params: { level: currentLogLevel } });
+                if (response.success) {
+                    const content = response.data ? escapeHtml(response.data).replace(/\n/g, '<br>') : 'No logs available.';
+                    logDisplay.innerHTML = content;
                 } else {
-                    logDisplay.innerHTML = 'No logs available or unable to load logs.';
+                    logDisplay.innerHTML = escapeHtml(response.message || 'Unable to load logs.');
                 }
             } catch (error) {
                 console.error('Error loading logs:', error);
-                document.getElementById('log-display').innerHTML = 'Error loading logs.';
+                logDisplay.innerHTML = 'Error loading logs.';
             }
         }
 
-        // Modal functions
+        function refreshLogs() {
+            loadActualLogs();
+            showToast('info', 'Logs refreshed');
+        }
+
+        async function clearLogs() {
+            if (!confirm('Clear Varnish logs? This will rotate the current log file.')) {
+                return;
+            }
+
+            try {
+                const response = await callApi('clearLogs', { method: 'POST' });
+                if (response.success) {
+                    showToast('success', response.message || 'Logs cleared');
+                    loadActualLogs();
+                } else {
+                    showToast('error', response.message || 'Unable to clear logs');
+                }
+            } catch (error) {
+                console.error('Error clearing logs:', error);
+                showToast('error', 'Unable to clear logs');
+            }
+        }
+
+        function changeLogLevel(level) {
+            currentLogLevel = level || 'all';
+            loadActualLogs();
+        }
+
         function showGlobalSettings() {
             document.getElementById('globalSettingsModal').classList.add('active');
         }
 
         function showPurgeAllModal() {
             document.getElementById('purgeAllModal').classList.add('active');
-            // Reset checkbox
             document.getElementById('confirmPurge').checked = false;
             document.getElementById('confirmPurgeBtn').disabled = true;
         }
@@ -1387,65 +1688,62 @@ print <<'EOF';
         async function executePurgeAll() {
             try {
                 closeModal('purgeAllModal');
-                showToast('info', 'Purging all cache... This may take a few moments.');
-                
-                const response = await fetch('/cgi/varnish_ajax.cgi?action=purgeAll', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ confirm: true })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    showToast('success', 'All cache has been successfully purged!');
-                    // Refresh metrics
-                    setTimeout(() => loadMetrics(), 2000);
+                showToast('info', 'Purging all cached content...');
+                const response = await callApi('purgeAll', { method: 'POST', body: { confirm: true } });
+                if (response.success) {
+                    showToast('success', response.message || 'All cache purged successfully');
+                    setTimeout(() => {
+                        loadMetrics();
+                        loadChartData();
+                    }, 1500);
                 } else {
-                    throw new Error(data.message || 'Failed to purge cache');
+                    showToast('error', response.message || 'Failed to purge cache');
                 }
             } catch (error) {
                 console.error('Error purging cache:', error);
-                showToast('error', 'Failed to purge cache: ' + error.message);
+                showToast('error', 'Failed to purge cache');
             }
         }
 
         function showToast(type, message) {
             const toast = document.createElement('div');
             toast.className = `toast toast-${type}`;
-            
-            const icon = type === 'success' ? 'check-circle' : 
-                        type === 'error' ? 'exclamation-circle' : 
-                        'info-circle';
-            
+
+            const icon = type === 'success'
+                ? 'check-circle'
+                : type === 'error'
+                    ? 'exclamation-circle'
+                    : 'info-circle';
+
             toast.innerHTML = `
                 <i class="fas fa-${icon}"></i>
                 <span>${message}</span>
             `;
-            
+
             document.body.appendChild(toast);
             setTimeout(() => toast.classList.add('active'), 100);
-            
-            // Auto remove
+
             setTimeout(() => {
                 toast.classList.remove('active');
                 setTimeout(() => document.body.removeChild(toast), 300);
             }, type === 'error' ? 5000 : 3000);
         }
 
-        // Utility functions
         function addDomain() {
             const domain = prompt('Enter domain name:');
             if (domain) {
-                // Add domain logic here
-                showToast('info', `Adding domain: ${domain}`);
+                showToast('info', `Add-on domains should be created inside WHM. Request received for ${domain}.`);
             }
         }
 
         function showDomainSettings(domain) {
-            alert(`Domain settings for: ${domain}`);
+            const details = domainSnapshot.find(item => item.name === domain);
+            if (details) {
+                const docroot = details.docroot || 'Unknown';
+                alert(`Domain: ${domain}\nDocument Root: ${docroot}\nRequests/min: ${formatNumber(details.requests_per_minute || 0)}`);
+            } else {
+                alert(`No additional information available for ${domain}.`);
+            }
         }
 
         function saveGlobalSettings() {
@@ -1454,40 +1752,66 @@ print <<'EOF';
         }
 
         function editVCL() {
-            alert('VCL editor would open here');
+            showToast('info', 'Use SSH or File Manager to edit /etc/varnish/default.vcl');
         }
 
-        function reloadVCL() {
-            showToast('info', 'Reloading VCL configuration...');
-        }
-
-        function saveSettings() {
-            showToast('success', 'Settings saved successfully!');
-        }
-
-        function refreshLogs() {
-            loadActualLogs();
-            showToast('info', 'Logs refreshed');
-        }
-
-        function clearLogs() {
-            if (confirm('Are you sure you want to clear all logs?')) {
-                document.getElementById('log-display').innerHTML = 'Logs cleared.';
-                showToast('info', 'Logs cleared');
-            }
-        }
-
-        function changeLogLevel(level) {
-            console.log('Changing log level to:', level);
-            loadActualLogs();
-        }
-
-        // Cleanup on page unload
-        window.addEventListener('beforeunload', function() {
-            if (refreshInterval) {
-                clearInterval(refreshInterval);
-            }
+        window.addEventListener('beforeunload', () => {
+            stopAutoRefresh();
         });
+
+        function escapeHtml(str) {
+            if (!str) {
+                return '';
+            }
+            return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === undefined || bytes === null || isNaN(bytes)) {
+                return '0B';
+            }
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let value = Math.max(0, bytes);
+            let unitIndex = 0;
+            while (value >= 1024 && unitIndex < units.length - 1) {
+                value /= 1024;
+                unitIndex++;
+            }
+            const decimals = value >= 10 || unitIndex === 0 ? 0 : 1;
+            return `${value.toFixed(decimals)}${units[unitIndex]}`;
+        }
+
+        function formatNumber(value) {
+            if (value === undefined || value === null || isNaN(value)) {
+                return '0';
+            }
+            if (Math.abs(value) >= 1000000) {
+                return `${(value / 1000000).toFixed(1)}M`;
+            }
+            if (Math.abs(value) >= 1000) {
+                return `${(value / 1000).toFixed(1)}K`;
+            }
+            return value.toFixed(0);
+        }
+
+        function formatPercentage(value) {
+            if (value === undefined || value === null || isNaN(value)) {
+                return 'N/A';
+            }
+            return `${value.toFixed(1)}%`;
+        }
+
+        function formatBandwidth(bytesPerSecond) {
+            if (bytesPerSecond === undefined || bytesPerSecond === null || isNaN(bytesPerSecond)) {
+                return '0B/s';
+            }
+            return `${formatBytes(bytesPerSecond)}/s`;
+        }
     </script>
 </body>
 </html>

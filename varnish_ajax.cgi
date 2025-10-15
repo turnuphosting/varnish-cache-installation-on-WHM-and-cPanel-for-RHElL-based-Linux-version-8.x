@@ -7,6 +7,17 @@ use CGI;
 use JSON;
 use File::Slurp;
 use POSIX qw(strftime);
+use Time::Piece;
+use File::Find ();
+use Fcntl qw(:flock);
+use File::Path qw(make_path);
+use File::Basename qw(dirname);
+use Cpanel::Config::userdata::Load ();
+use Cpanel::AcctUtils::DomainOwner ();
+
+use constant HISTORY_FILE => '/var/log/varnish/varnish-manager-history.json';
+use constant SETTINGS_FILE => '/etc/varnish/cpanel-manager-settings.json';
+use constant HISTORY_LIMIT => 1440;
 
 # Create CGI object
 my $cgi = CGI->new();
@@ -38,6 +49,8 @@ if ($action eq 'getMetrics') {
     $response = save_settings();
 } elsif ($action eq 'reloadVCL') {
     $response = reload_vcl();
+} elsif ($action eq 'clearLogs') {
+    $response = clear_logs();
 } else {
     $response = { success => 0, message => "Unknown action: $action" };
 }
@@ -48,84 +61,90 @@ exit 0;
 
 # Function to get current metrics
 sub get_metrics {
-    my %metrics = ();
-    
+    my %metrics;
+
     eval {
-        # Get Varnish stats
-        my $varnish_stats = get_varnish_stats();
-        
-        # Calculate overall performance score
-        my $hit_rate = $varnish_stats->{hit_rate} || 94;
-        my $overall_score = calculate_performance_score($varnish_stats);
-        
-        # Get system stats
-        my $system_stats = get_system_stats();
-        
+        my $varnish = get_varnish_stats();
+        my $system = get_system_stats();
+        my $response_time = measure_response_time();
+
+        my $requests_per_second = $varnish->{requests_per_second} || 0;
+        my $peak_rps = compute_peak_requests_per_second($requests_per_second);
+
         %metrics = (
-            overall_score => $overall_score,
-            hit_rate => $hit_rate . '%',
-            cache_size => format_bytes($varnish_stats->{cache_size} || 26214400000), # 24.5GB default
-            request_rate => format_number($varnish_stats->{requests_per_minute} || 5200) . '/min',
-            ssl_status => get_ssl_status(),
-            cpu_usage => $system_stats->{cpu_usage} . '% - ' . $system_stats->{cpu_cores} . ' Cores',
-            memory_usage => format_bytes($system_stats->{memory_used}) . ' of ' . format_bytes($system_stats->{memory_total}),
-            requests_per_second => format_number($varnish_stats->{requests_per_second} || 1200) . ' - Peak: ' . format_number($varnish_stats->{peak_requests} || 2500),
+            overall_score            => calculate_performance_score($varnish),
+            hit_rate                 => $varnish->{hit_rate},
+            cache_size_bytes         => $varnish->{cache_size_bytes},
+            request_rate_per_minute  => $varnish->{requests_per_minute},
+            ssl_status               => get_ssl_status(),
+            cpu_usage_percent        => $system->{cpu_usage},
+            cpu_cores                => $system->{cpu_cores},
+            memory_total_bytes       => $system->{memory_total},
+            memory_used_bytes        => $system->{memory_used},
+            requests_per_second      => $requests_per_second,
+            peak_requests_per_second => $peak_rps,
+            response_time_ms         => $response_time,
+            bandwidth_bytes_per_sec  => $varnish->{bandwidth_bytes_per_sec},
         );
+
+        record_metrics_history({
+            timestamp               => time,
+            hit_rate                => $metrics{hit_rate},
+            response_time_ms        => $metrics{response_time_ms},
+            bandwidth_bytes_per_sec => $metrics{bandwidth_bytes_per_sec},
+            requests_per_second     => $metrics{requests_per_second},
+        });
     };
-    
+
     if ($@) {
         return { success => 0, message => "Error getting metrics: $@" };
     }
-    
+
     return { success => 1, data => \%metrics };
 }
 
 # Function to get Varnish statistics
 sub get_varnish_stats {
-    my %stats = ();
-    
-    # Try to get stats from varnishstat
-    if (-x '/usr/bin/varnishstat') {
-        my $varnish_output = `varnishstat -1 2>/dev/null`;
-        
-        if ($? == 0 && $varnish_output) {
-            # Parse varnishstat output
-            my @lines = split(/\n/, $varnish_output);
-            
-            my ($cache_hits, $cache_miss, $total_requests) = (0, 0, 0);
-            
-            foreach my $line (@lines) {
-                if ($line =~ /^MAIN\.cache_hit\s+(\d+)/) {
-                    $cache_hits = $1;
-                } elsif ($line =~ /^MAIN\.cache_miss\s+(\d+)/) {
-                    $cache_miss = $1;
-                } elsif ($line =~ /^MAIN\.client_req\s+(\d+)/) {
-                    $total_requests = $1;
-                }
-            }
-            
-            if ($total_requests > 0) {
-                $stats{hit_rate} = int(($cache_hits / $total_requests) * 100);
-                $stats{requests_per_second} = int($total_requests / 86400); # Rough estimate
-                $stats{requests_per_minute} = $stats{requests_per_second} * 60;
-            }
+    my %stats = (
+        hit_rate                => 0,
+        requests_per_second     => 0,
+        requests_per_minute     => 0,
+        cache_size_bytes        => 0,
+        bandwidth_bytes_per_sec => 0,
+    );
+
+    return \%stats unless -x '/usr/bin/varnishstat';
+
+    my $json = `varnishstat -1 -j 2>/dev/null`;
+    if ($? == 0 && $json) {
+        my $data = eval { decode_json($json) };
+        if ($@) {
+            return \%stats;
         }
+
+        my $hits        = $data->{'MAIN.cache_hit'}{value}      // 0;
+        my $misses      = $data->{'MAIN.cache_miss'}{value}     // 0;
+        my $client_req  = $data->{'MAIN.client_req'}{value}     // ($hits + $misses);
+        my $uptime      = $data->{'MAIN.uptime'}{value}         || 1;
+        my $resp_bytes  = $data->{'MAIN.s_resp_bodybytes'}{value} // 0;
+        my $storage_use = $data->{'SMA.s0.g_bytes'}{value}
+                           // $data->{'SMA.Transient.g_bytes'}{value}
+                           // 0;
+
+        if ($client_req > 0) {
+            my $hit_rate = ($hits / $client_req) * 100;
+            $stats{hit_rate} = $hit_rate > 100 ? 100 : $hit_rate;
+        }
+
+        if ($uptime > 0) {
+            $stats{requests_per_second}     = $client_req / $uptime;
+            $stats{requests_per_minute}     = $stats{requests_per_second} * 60;
+            $stats{bandwidth_bytes_per_sec} = $resp_bytes / $uptime;
+        }
+
+        $stats{cache_size_bytes} = $storage_use;
     }
-    
-    # Get cache size from filesystem if available
-    if (-d '/var/lib/varnish') {
-        my $cache_size = `du -sb /var/lib/varnish 2>/dev/null | cut -f1`;
-        chomp($cache_size);
-        $stats{cache_size} = $cache_size || 26214400000;
-    }
-    
-    # Set defaults if we couldn't get real data
-    $stats{hit_rate} ||= 94;
-    $stats{requests_per_second} ||= 1200;
-    $stats{requests_per_minute} ||= 5200;
-    $stats{peak_requests} ||= 2500;
-    $stats{cache_size} ||= 26214400000; # 24.5GB
-    
+
     return \%stats;
 }
 
@@ -140,8 +159,7 @@ sub get_system_stats {
         $stats{cpu_cores} = $cpu_cores;
         
         # Get CPU usage
-        my $cpu_usage = get_cpu_usage();
-        $stats{cpu_usage} = $cpu_usage;
+        $stats{cpu_usage} = get_cpu_usage();
     } else {
         $stats{cpu_cores} = 8;
         $stats{cpu_usage} = 32;
@@ -161,7 +179,8 @@ sub get_system_stats {
         }
         
         $stats{memory_total} = $mem_total || 4294967296; # 4GB default
-        $stats{memory_used} = ($mem_total - $mem_available) || 3006477107; # ~2.8GB default
+        my $used = $mem_total - $mem_available;
+        $stats{memory_used} = $used > 0 ? $used : 0;
     } else {
         $stats{memory_total} = 4294967296; # 4GB
         $stats{memory_used} = 3006477107;  # ~2.8GB
@@ -172,19 +191,87 @@ sub get_system_stats {
 
 # Function to get CPU usage
 sub get_cpu_usage {
-    if (-f '/proc/loadavg') {
-        my $loadavg = read_file('/proc/loadavg');
-        my ($load1) = split(/\s+/, $loadavg);
-        
-        # Convert load average to percentage (rough estimate)
-        my $cpu_cores = `grep -c ^processor /proc/cpuinfo 2>/dev/null` || 8;
-        chomp($cpu_cores);
-        
-        my $cpu_percent = int(($load1 / $cpu_cores) * 100);
-        return $cpu_percent > 100 ? 100 : $cpu_percent;
+    return 32 unless -f '/proc/stat';
+
+    my $first = read_proc_stat();
+    return 32 unless $first;
+    select(undef, undef, undef, 0.25);
+    my $second = read_proc_stat();
+    return 32 unless $second;
+
+    my $total_diff = $second->{total} - $first->{total};
+    my $idle_diff  = $second->{idle}  - $first->{idle};
+    return 32 if $total_diff <= 0;
+
+    my $usage = (1 - ($idle_diff / $total_diff)) * 100;
+    $usage = 0   if $usage < 0;
+    $usage = 100 if $usage > 100;
+    return sprintf('%.1f', $usage) + 0;
+}
+
+sub read_proc_stat {
+    open my $fh, '<', '/proc/stat' or return;
+    my $line = <$fh>;
+    close $fh;
+    return unless $line && $line =~ /^cpu\s+/;
+
+    my @parts = split /\s+/, $line;
+    shift @parts; # remove "cpu"
+    my $idle = ($parts[3] // 0) + ($parts[4] // 0); # idle + iowait
+    my $total = 0;
+    for my $i (0 .. 7) {
+        $total += $parts[$i] // 0;
     }
-    
-    return 32; # Default value
+    return { total => $total, idle => $idle };
+}
+
+sub measure_response_time {
+    return undef unless -x '/usr/bin/curl';
+    my $output = `curl -s -o /dev/null -w '%{time_total}' http://127.0.0.1/ 2>/dev/null`;
+    return undef if $? != 0 || !$output;
+    chomp($output);
+    return undef unless $output =~ /^[0-9.]+$/;
+    my $ms = $output * 1000;
+    return int($ms);
+}
+
+sub record_metrics_history {
+    my ($entry) = @_;
+    return unless $entry && ref $entry eq 'HASH';
+
+    my $history = read_metrics_history();
+    push @$history, $entry;
+    if (@$history > HISTORY_LIMIT) {
+        splice @$history, 0, @$history - HISTORY_LIMIT;
+    }
+
+    eval {
+        make_path(dirname(HISTORY_FILE));
+        open my $fh, '>', HISTORY_FILE or die "Unable to write history file";
+        flock($fh, LOCK_EX);
+        print $fh encode_json($history);
+        close $fh;
+    };
+}
+
+sub read_metrics_history {
+    return [] unless -f HISTORY_FILE;
+    my $content = eval { read_file(HISTORY_FILE) };
+    return [] unless $content;
+    my $data = eval { decode_json($content) };
+    return ref $data eq 'ARRAY' ? $data : [];
+}
+
+sub compute_peak_requests_per_second {
+    my ($current) = @_;
+    my $peak = $current || 0;
+    my $history = read_metrics_history();
+    for my $item (@$history) {
+        next unless ref $item eq 'HASH';
+        next unless defined $item->{requests_per_second};
+        $peak = $item->{requests_per_second} if $item->{requests_per_second} > $peak;
+    }
+    return $peak;
 }
 
 # Function to calculate performance score
@@ -247,23 +334,106 @@ sub get_ssl_status {
 # Function to get domain list
 sub get_domains {
     my @domains = ();
-    
+
     eval {
-        # Try to get domains from Apache configuration
-        my @apache_domains = get_apache_domains();
-        
-        if (@apache_domains) {
-            @domains = @apache_domains;
+        my $domain_map = load_domain_map();
+
+        if (@$domain_map) {
+            my $varnish_stats = get_varnish_stats();
+            my $history       = read_metrics_history();
+            my $latest_entry  = @$history ? $history->[-1] : undef;
+
+            my $hit_rate = defined $latest_entry->{hit_rate}
+                ? $latest_entry->{hit_rate}
+                : ($varnish_stats->{hit_rate} // 0);
+            my $hit_rate_value = defined $hit_rate ? $hit_rate : 0;
+
+            my $requests_per_minute = defined $latest_entry->{requests_per_second}
+                ? ($latest_entry->{requests_per_second} * 60)
+                : ($varnish_stats->{requests_per_minute} // 0);
+
+            my $cache_total     = $varnish_stats->{cache_size_bytes}        || 0;
+            my $bandwidth_total = $varnish_stats->{bandwidth_bytes_per_sec} || 0;
+
+            my $domain_counts   = count_domain_requests_from_logs($domain_map);
+            my $window_seconds  = delete $domain_counts->{__window_seconds} || 0;
+            my $window_minutes  = $window_seconds > 0 ? ($window_seconds / 60) : 0;
+            my $counts_observed = 0;
+
+            for my $entry (@$domain_map) {
+                my $domain = $entry->{domain};
+                $counts_observed += $domain_counts->{$domain} || 0;
+            }
+
+            if ($window_minutes > 0 && $counts_observed > 0) {
+                $requests_per_minute = $counts_observed / $window_minutes;
+            }
+
+            my $domain_total = scalar @$domain_map || 1;
+
+            for my $entry (@$domain_map) {
+                my $domain  = $entry->{domain};
+                my $owner   = $entry->{owner};
+                my $docroot = get_domain_docroot($domain, $owner);
+                my $size    = get_directory_size($docroot);
+
+                my $raw_count = $domain_counts->{$domain} || 0;
+
+                my $domain_requests = 0;
+                if ($window_minutes > 0 && $raw_count > 0) {
+                    $domain_requests = $raw_count / $window_minutes;
+                } elsif ($counts_observed > 0 && $requests_per_minute > 0) {
+                    my $share = $raw_count / $counts_observed;
+                    $domain_requests = $requests_per_minute * $share;
+                } else {
+                    $domain_requests = $domain_total > 0 ? $requests_per_minute / $domain_total : 0;
+                }
+
+                my $share = 0;
+                if ($counts_observed > 0) {
+                    $share = $raw_count / $counts_observed;
+                } elsif ($domain_total > 0) {
+                    $share = 1 / $domain_total;
+                }
+
+                $share = 0 if $share < 0;
+                $share = 1 if $share > 1;
+
+                my $allocated_cache     = $cache_total     ? int($cache_total * $share)  : undef;
+                my $allocated_bandwidth = $bandwidth_total ? ($bandwidth_total * $share) : undef;
+
+                my $status = 'active';
+                if (!$docroot || !-d $docroot) {
+                    $status = $domain_requests > 0 ? 'warning' : 'inactive';
+                } elsif ($domain_requests < 0.5) {
+                    $status = 'inactive';
+                }
+
+                push @domains, {
+                    name                    => $domain,
+                    owner                   => $owner // '',
+                    docroot                 => $docroot,
+                    docroot_size_bytes      => $size,
+                    hit_rate                => sprintf('%.2f', $hit_rate_value) + 0,
+                    requests_per_minute     => sprintf('%.2f', $domain_requests) + 0,
+                    cache_size_bytes        => $allocated_cache,
+                    bandwidth_bytes_per_sec => defined $allocated_bandwidth
+                        ? sprintf('%.2f', $allocated_bandwidth) + 0
+                        : undef,
+                    status                  => $status,
+                };
+            }
+
+            @domains = sort { $a->{name} cmp $b->{name} } @domains;
         } else {
-            # Fallback to sample data
             @domains = get_sample_domains();
         }
     };
-    
+
     if ($@) {
         return { success => 0, message => "Error getting domains: $@" };
     }
-    
+
     return { success => 1, data => \@domains };
 }
 
@@ -304,38 +474,330 @@ sub get_apache_domains {
 # Function to get sample domains for demonstration
 sub get_sample_domains {
     return (
-        { name => 'example.com', hit_rate => 98, requests => '2.4K/min', size => '8.2GB', status => 'active' },
-        { name => 'test.com', hit_rate => 95, requests => '1.8K/min', size => '5.1GB', status => 'active' },
-        { name => 'shop.example.com', hit_rate => 92, requests => '3.1K/min', size => '12.4GB', status => 'active' },
-        { name => 'blog.example.com', hit_rate => 89, requests => '1.2K/min', size => '3.8GB', status => 'active' },
-        { name => 'api.example.com', hit_rate => 85, requests => '5.6K/min', size => '2.1GB', status => 'warning' },
-        { name => 'cdn.example.com', hit_rate => 99, requests => '8.9K/min', size => '18.7GB', status => 'active' },
-        { name => 'staging.example.com', hit_rate => 76, requests => '0.3K/min', size => '1.2GB', status => 'inactive' },
-        { name => 'dev.example.com', hit_rate => 68, requests => '0.1K/min', size => '0.8GB', status => 'inactive' },
-        { name => 'mobile.example.com', hit_rate => 94, requests => '4.2K/min', size => '6.3GB', status => 'active' }
+        {
+            name                    => 'example.com',
+            owner                   => 'cpuser',
+            docroot                 => '/home/cpuser/public_html',
+            docroot_size_bytes      => 8_200_000_000,
+            hit_rate                => 98.4,
+            requests_per_minute     => 2400,
+            cache_size_bytes        => 5_000_000_000,
+            bandwidth_bytes_per_sec => 1_200_000,
+            status                  => 'active'
+        },
+        {
+            name                    => 'test.com',
+            owner                   => 'cpanel',
+            docroot                 => '/home/cpanel/public_html',
+            docroot_size_bytes      => 5_100_000_000,
+            hit_rate                => 95.1,
+            requests_per_minute     => 1800,
+            cache_size_bytes        => 3_400_000_000,
+            bandwidth_bytes_per_sec => 980_000,
+            status                  => 'active'
+        },
+        {
+            name                    => 'shop.example.com',
+            owner                   => 'shopuser',
+            docroot                 => '/home/shopuser/public_html',
+            docroot_size_bytes      => 12_400_000_000,
+            hit_rate                => 92.0,
+            requests_per_minute     => 3100,
+            cache_size_bytes        => 4_800_000_000,
+            bandwidth_bytes_per_sec => 1_540_000,
+            status                  => 'active'
+        },
+        {
+            name                    => 'blog.example.com',
+            owner                   => 'blogger',
+            docroot                 => '/home/blogger/public_html',
+            docroot_size_bytes      => 3_800_000_000,
+            hit_rate                => 89.3,
+            requests_per_minute     => 1200,
+            cache_size_bytes        => 2_100_000_000,
+            bandwidth_bytes_per_sec => 620_000,
+            status                  => 'active'
+        },
+        {
+            name                    => 'api.example.com',
+            owner                   => 'apiuser',
+            docroot                 => '/home/apiuser/public_html',
+            docroot_size_bytes      => 2_100_000_000,
+            hit_rate                => 85.6,
+            requests_per_minute     => 5600,
+            cache_size_bytes        => 1_800_000_000,
+            bandwidth_bytes_per_sec => 2_600_000,
+            status                  => 'warning'
+        },
+        {
+            name                    => 'cdn.example.com',
+            owner                   => 'cdnuser',
+            docroot                 => '/home/cdnuser/public_html',
+            docroot_size_bytes      => 18_700_000_000,
+            hit_rate                => 99.0,
+            requests_per_minute     => 8900,
+            cache_size_bytes        => 6_700_000_000,
+            bandwidth_bytes_per_sec => 3_900_000,
+            status                  => 'active'
+        },
+        {
+            name                    => 'staging.example.com',
+            owner                   => 'stageuser',
+            docroot                 => '/home/stageuser/public_html',
+            docroot_size_bytes      => 1_200_000_000,
+            hit_rate                => 76.0,
+            requests_per_minute     => 300,
+            cache_size_bytes        => 800_000_000,
+            bandwidth_bytes_per_sec => 120_000,
+            status                  => 'inactive'
+        },
+        {
+            name                    => 'dev.example.com',
+            owner                   => 'devuser',
+            docroot                 => '/home/devuser/public_html',
+            docroot_size_bytes      => 800_000_000,
+            hit_rate                => 68.2,
+            requests_per_minute     => 100,
+            cache_size_bytes        => 420_000_000,
+            bandwidth_bytes_per_sec => 80_000,
+            status                  => 'inactive'
+        },
+        {
+            name                    => 'mobile.example.com',
+            owner                   => 'mobile',
+            docroot                 => '/home/mobile/public_html',
+            docroot_size_bytes      => 6_300_000_000,
+            hit_rate                => 94.7,
+            requests_per_minute     => 4200,
+            cache_size_bytes        => 3_200_000_000,
+            bandwidth_bytes_per_sec => 1_900_000,
+            status                  => 'active'
+        }
     );
+}
+
+sub load_domain_map {
+    my @domains;
+    my %seen;
+
+    my $userdomains_file = '/etc/userdomains';
+    if (-f $userdomains_file && -r $userdomains_file) {
+        my $lines = eval { read_file($userdomains_file, array_ref => 1, chomp => 1) };
+        if ($lines && ref $lines eq 'ARRAY') {
+            foreach my $line (@$lines) {
+                next unless defined $line;
+                next if $line =~ /^\s*#/;
+                next if $line !~ /:/;
+                my ($domain, $user) = split /:/, $line, 2;
+                next unless $domain && $user;
+                $domain =~ s/^\s+|\s+$//g;
+                $user   =~ s/^\s+|\s+$//g;
+                next unless $domain && $user;
+                next if $domain =~ /^\*/;
+                next if $seen{lc $domain}++;
+                push @domains, { domain => $domain, owner => $user };
+            }
+        }
+    }
+
+    return \@domains;
+}
+
+sub get_domain_docroot {
+    my ($domain, $owner) = @_;
+    return '' unless $domain;
+
+    if (!$owner) {
+        $owner = eval { Cpanel::AcctUtils::DomainOwner::getdomainowner($domain) } || '';
+    }
+
+    my $docroot = '';
+
+    if ($owner) {
+        eval {
+            my $userdata = Cpanel::Config::userdata::Load::load_userdata($owner, $domain);
+            if ($userdata && ref $userdata eq 'HASH') {
+                $docroot = $userdata->{documentroot} || $userdata->{docroot} || '';
+            }
+        };
+
+        if (!$docroot) {
+            eval {
+                my $main_userdata = Cpanel::Config::userdata::Load::load_userdata($owner, 'main');
+                if ($main_userdata && ref $main_userdata eq 'HASH') {
+                    $docroot = $main_userdata->{documentroot} || $main_userdata->{docroot} || '';
+                }
+            };
+        }
+    }
+
+    if ($docroot && -d $docroot) {
+        return $docroot;
+    }
+
+    if ($owner) {
+        for my $candidate (
+            "/home/$owner/public_html",
+            "/home/$owner/www",
+            "/var/www/$domain/public_html"
+        ) {
+            return $candidate if -d $candidate;
+        }
+    }
+
+    return '';
+}
+
+sub get_directory_size {
+    my ($path) = @_;
+    return 0 unless $path && -d $path;
+
+    if (-x '/usr/bin/du') {
+        my $output = `du -sb "$path" 2>/dev/null`;
+        if ($? == 0 && $output =~ /^(\d+)/) {
+            return $1 + 0;
+        }
+    }
+
+    my $size = 0;
+    eval {
+        File::Find::find(
+            sub {
+                return unless -f $_;
+                my $file_size = -s _;
+                $size += $file_size if defined $file_size;
+            },
+            $path
+        );
+    };
+
+    return $size;
+}
+
+sub find_varnish_log_file {
+    my @candidates = (
+        '/var/log/varnish/varnishncsa.log',
+        '/var/log/varnish/varnish.log',
+        '/var/log/varnish/varnishlog.log',
+        '/var/log/messages'
+    );
+
+    foreach my $file (@candidates) {
+        return $file if -f $file && -r $file;
+    }
+
+    return undef;
+}
+
+sub count_domain_requests_from_logs {
+    my ($domain_map) = @_;
+    return {} unless $domain_map && ref $domain_map eq 'ARRAY' && @$domain_map;
+    return {} if @$domain_map > 200;
+
+    my $log_file = find_varnish_log_file();
+    return {} unless $log_file;
+
+    my $content = `tail -n 2000 "$log_file" 2>/dev/null`;
+    return {} unless $content;
+
+    my %lookup;
+    foreach my $entry (@$domain_map) {
+        my $name = $entry->{domain} || next;
+        $lookup{lc $name} = $name;
+    }
+    return {} unless %lookup;
+
+    my $pattern = join '|', map { quotemeta $_ } sort { length $b <=> length $a } keys %lookup;
+    my $regex = qr/($pattern)/i;
+
+    my %counts;
+    my $first_epoch;
+    my $last_epoch;
+
+    foreach my $line (split /\n/, $content) {
+        if (my $epoch = extract_epoch_from_log_line($line)) {
+            $first_epoch = $epoch if !defined $first_epoch || $epoch < $first_epoch;
+            $last_epoch  = $epoch if !defined $last_epoch  || $epoch > $last_epoch;
+        }
+
+        while ($line =~ /$regex/g) {
+            my $matched = lc $1;
+            my $domain  = $lookup{$matched} || next;
+            $counts{$domain}++;
+        }
+    }
+
+    if (defined $first_epoch && defined $last_epoch && $last_epoch > $first_epoch) {
+        $counts{__window_seconds} = $last_epoch - $first_epoch;
+    }
+
+    return \%counts;
+}
+
+sub extract_epoch_from_log_line {
+    my ($line) = @_;
+    return unless $line && $line =~ /\[(\d{2}\/\w{3}\/\d{4}:\d{2}:\d{2}:\d{2} [+-]\d{4})\]/;
+
+    my $timestamp = $1;
+    my $epoch = eval { Time::Piece->strptime($timestamp, "%d/%b/%Y:%H:%M:%S %z")->epoch };
+    return $epoch unless $@;
+    return;
 }
 
 # Function to get chart data
 sub get_chart_data {
     my $timeframe = $cgi->param('timeframe') || 'hourly';
-    
-    # Generate sample chart data based on timeframe
-    my @data = ();
-    my $points = ($timeframe eq 'hourly') ? 24 : 
-                 ($timeframe eq 'daily') ? 30 : 
-                 ($timeframe eq 'weekly') ? 52 : 365;
-    
-    for (my $i = 0; $i < $points; $i++) {
+
+    my %windows = (
+        hourly  => 3600,
+        daily   => 86400,
+        weekly  => 604800,
+        monthly => 2592000,
+    );
+
+    my $window = $windows{$timeframe} || $windows{hourly};
+    my $history = read_metrics_history();
+
+    if (!@$history) {
+        my $metrics_snapshot = get_metrics();
+        if ($metrics_snapshot->{success}) {
+            $history = read_metrics_history();
+        }
+    }
+
+    return { success => 1, data => [] } unless @$history;
+
+    my $now = time;
+    my @filtered = grep {
+        my $ts = $_->{timestamp};
+        defined $ts && ($ts >= $now - $window);
+    } @$history;
+
+    @filtered = @$history unless @filtered;
+    @filtered = sort { ($a->{timestamp} // 0) <=> ($b->{timestamp} // 0) } @filtered;
+
+    my $max_points = 200;
+    if (@filtered > $max_points) {
+        my $step = int(@filtered / $max_points) || 1;
+        my @downsampled;
+        for (my $i = 0; $i < @filtered; $i += $step) {
+            push @downsampled, $filtered[$i];
+        }
+        @filtered = @downsampled;
+    }
+
+    my @data;
+    foreach my $entry (@filtered) {
+        my $requests_per_second = $entry->{requests_per_second} // 0;
         push @data, {
-            timestamp => time() - ($i * 3600), # Hour intervals
-            hit_rate => 85 + int(rand(15)),     # 85-99%
-            response_time => 50 + int(rand(200)), # 50-250ms
-            bandwidth_usage => int(rand(100000000)), # 0-100MB
-            request_count => 1000 + int(rand(4000))  # 1K-5K requests
+            timestamp       => $entry->{timestamp} // $now,
+            hit_rate        => defined $entry->{hit_rate} ? 0 + sprintf('%.2f', $entry->{hit_rate}) : 0,
+            response_time   => $entry->{response_time_ms} // 0,
+            bandwidth_usage => $entry->{bandwidth_bytes_per_sec} // 0,
+            request_count   => int($requests_per_second * 60),
         };
     }
-    
+
     return { success => 1, data => \@data };
 }
 
@@ -549,8 +1011,67 @@ sub get_apache_version {
 
 # Function to save settings
 sub save_settings {
-    # This is a placeholder - in real implementation, you'd save to actual config files
-    return { success => 1, message => "Settings saved successfully" };
+    my $body = read_request_body();
+    my $payload = {};
+
+    if ($body) {
+        $payload = eval { decode_json($body) };
+        if ($@ || ref $payload ne 'HASH') {
+            return { success => 0, message => 'Invalid request payload' };
+        }
+    }
+
+    my $backend_host = $payload->{backend_host} || '127.0.0.1';
+    my $backend_port = $payload->{backend_port} || 8080;
+    my $health_check = $payload->{health_check} ? 1 : 0;
+
+    eval {
+        my $settings = {
+            backend_host         => $backend_host,
+            backend_port         => $backend_port,
+            health_check_enabled => $health_check ? JSON::true : JSON::false,
+            updated_at           => time,
+        };
+
+        make_path(dirname(SETTINGS_FILE));
+        write_file(SETTINGS_FILE, encode_json($settings));
+
+        update_vcl_backend($backend_host, $backend_port);
+        system('/bin/systemctl', 'reload', 'varnish') if -x '/bin/systemctl';
+    };
+
+    if ($@) {
+        return { success => 0, message => "Failed to save settings: $@" };
+    }
+
+    return { success => 1, message => 'Backend configuration updated. Reload Hitch if certificates changed.' };
+}
+
+sub read_request_body {
+    my $body = $cgi->param('POSTDATA');
+    if (!defined $body) {
+        my $length = $ENV{'CONTENT_LENGTH'} || 0;
+        if ($length > 0) {
+            read(STDIN, $body, $length);
+        } else {
+            $body = '';
+        }
+    }
+    return $body || '';
+}
+
+sub update_vcl_backend {
+    my ($host, $port) = @_;
+    my $vcl_path = '/etc/varnish/default.vcl';
+    return unless -f $vcl_path;
+
+    my $vcl = eval { read_file($vcl_path) };
+    return unless $vcl;
+
+    $vcl =~ s/(\.host\s*=\s*")[^"]+(")/$1$host$2/;
+    $vcl =~ s/(\.port\s*=\s*")[^"]+(")/$1$port$2/;
+
+    eval { write_file($vcl_path, $vcl) };
 }
 
 # Function to reload VCL

@@ -160,7 +160,13 @@ check_port_conflict() {
     fi
 
     if [ -n "$conflict_info" ]; then
-        log "WARN" "${YELLOW}⚠️ Port ${port} (${label}) is currently in use. Stop the conflicting service before continuing.${NC}"
+        local conflict_summary
+        conflict_summary=$(echo "$conflict_info" | head -n 1 | sed 's/[[:space:]]\+/ /g')
+        if [ -n "$conflict_summary" ]; then
+            log "WARN" "${YELLOW}⚠️ Port ${port} (${label}) is currently in use by:${NC} ${conflict_summary}"
+        else
+            log "WARN" "${YELLOW}⚠️ Port ${port} (${label}) is currently in use. Stop the conflicting service before continuing.${NC}"
+        fi
         echo "$conflict_info" >> "$LOG_FILE"
     fi
 }
@@ -443,7 +449,7 @@ configure_system() {
 ExecStart=
 ExecStart=/usr/sbin/varnishd \\
     -a :80 \\
-    -a :8443,PROXY \\
+    -a :4443,PROXY \
     -T localhost:6082 \\
     -f /etc/varnish/default.vcl \\
     -S /etc/varnish/secret \\
@@ -462,6 +468,8 @@ LimitMEMLOCK=infinity
 EOF
 
     systemctl daemon-reload
+
+    check_port_conflict 4443 "Varnish TLS listener"
     
     log "INFO" "${GREEN}✅ System configured${NC}"
 }
@@ -520,7 +528,7 @@ configure_hitch_tls() {
 
     cat > "$hitch_conf" <<EOF
 frontend = "[*]:443"
-backend = "[127.0.0.1]:8443"
+backend = "[127.0.0.1]:4443"
 workers = $((CPU_CORES < 4 ? 4 : CPU_CORES))
 daemon = on
 user = "hitch"
@@ -553,15 +561,21 @@ EOF
 }
 
 cleanup_existing_whm_plugin() {
-    local plugin_dir="/usr/local/cpanel/whm/docroot/cgi/varnish"
     local theme=""
     local dynamic_dir=""
+    local plugin_dir=""
 
     if command -v /usr/local/cpanel/bin/unregister_appconfig >/dev/null 2>&1; then
         /usr/local/cpanel/bin/unregister_appconfig varnish_cache_manager >/dev/null 2>&1 || true
     fi
 
-    rm -rf "$plugin_dir" 2>/dev/null || true
+    for plugin_dir in \
+        /usr/local/cpanel/whostmgr/docroot/cgi/varnish \
+        /usr/local/cpanel/whm/docroot/cgi/varnish
+    do
+        rm -rf "$plugin_dir" 2>/dev/null || true
+    done
+
     rm -f /usr/local/cpanel/whm/addonfeatures/varnish 2>/dev/null || true
     rm -f /var/cpanel/whm/addon_plugins/varnish.conf 2>/dev/null || true
 
@@ -580,26 +594,28 @@ install_whm_plugin() {
         log "INFO" "${BLUE}🎮 Installing WHM management plugin...${NC}"
         cleanup_existing_whm_plugin
         
+        local plugin_dir="/usr/local/cpanel/whostmgr/docroot/cgi/varnish"
+
         # Create WHM plugin directory
-        if ! mkdir -p /usr/local/cpanel/whm/docroot/cgi/varnish; then
+        if ! mkdir -p "$plugin_dir"; then
             log "WARN" "${YELLOW}⚠️ Failed to create WHM plugin directory - continuing without plugin${NC}"
             return 0
         fi
         
         # Install plugin files
-        if ! cp whm_varnish_manager.cgi /usr/local/cpanel/whm/docroot/cgi/varnish/ 2>/dev/null; then
+        if ! cp whm_varnish_manager.cgi "$plugin_dir/" 2>/dev/null; then
             log "WARN" "${YELLOW}⚠️ Failed to copy WHM manager script - continuing without plugin${NC}"
             return 0
         fi
         
-        if ! cp varnish_ajax.cgi /usr/local/cpanel/whm/docroot/cgi/varnish/ 2>/dev/null; then
+        if ! cp varnish_ajax.cgi "$plugin_dir/" 2>/dev/null; then
             log "WARN" "${YELLOW}⚠️ Failed to copy AJAX handler script - continuing without plugin${NC}"
             return 0
         fi
         
-        chmod +x /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
-        chown root:root /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
-        sed -i 's/\r$//' /usr/local/cpanel/whm/docroot/cgi/varnish/*.cgi 2>/dev/null || true
+        chmod +x "$plugin_dir"/*.cgi 2>/dev/null || true
+        chown root:root "$plugin_dir"/*.cgi 2>/dev/null || true
+        sed -i 's/\r$//' "$plugin_dir"/*.cgi 2>/dev/null || true
         
         # Register plugin using AppConfig for modern WHM themes
         local appconfig_tmp
@@ -613,8 +629,8 @@ group=System
 category=software
 feature=varnish_cache_manager
 acls=any
-url=varnish/whm_varnish_manager.cgi
-entryurl=varnish/whm_varnish_manager.cgi
+url=/cgi/varnish/whm_varnish_manager.cgi
+entryurl=/cgi/varnish/whm_varnish_manager.cgi
 target=_self
 icon=chart-area
 EOF
@@ -650,7 +666,7 @@ EOF
         "name": "varnish_cache_manager",
         "type": "link",
         "data": {
-            "href": "varnish/whm_varnish_manager.cgi",
+            "href": "cgi/varnish/whm_varnish_manager.cgi",
             "target": "self"
         },
         "metadata": {
